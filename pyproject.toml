@@ -1,0 +1,15 @@
+[project]
+name = "support-agent-platform"
+version = "0.1.0"
+description = "AI Support Agent for food delivery store directors using Aiogram and Langchain"
+requires-python = ">=3.9"
+dependencies = [
+    "python-dotenv>=0.21.0",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.1.0",
+    "aiogram>=3.3.0",
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0"
+]
+
+[tool.uv]

@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Флаг для включения/выключения заглушки RAG
-USE_RAG_MOCK = True # Установите в False, когда реальный RAG-сервис будет гатов
+USE_RAG_MOCK = False # Установите в False, когда реальный RAG-сервис будет гщтов
 
 MOCKED_KNOWLEDGE_EXTRACTS = {
     "курьер пьяный": [
@@ -45,7 +45,11 @@ async def query_rag_service(query_text: str, top_k: int = 3) -> Dict[str, Any]:
         return {"success": True, "data": chunks[:top_k]}
 
     # Код для реального RAG-сервиса
-    payload = {"query": query_text, "top_k": top_k}
+    payload = {
+        "collection_name": "courier_job_description",
+        "query": query_text,
+        "top_k": top_k
+    }
     logger.info(f"[RAG Client] Запрос к RAG: {RAG_API_URL} с payload: {payload}")
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

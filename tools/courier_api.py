@@ -14,11 +14,11 @@ MOCK_COURIERS_DB = {
 
 # Мок базы данных смен
 MOCK_SHIFTS_DB = {
-    "S101": {"shift_id": "S101", "courier_id": "123", "warehouse_id": "W1", "date": "2024-07-30", "status": "active", "time_slot": "09:00-18:00"},
-    "S102": {"shift_id": "S102", "courier_id": "789", "warehouse_id": "W1", "date": "2024-07-30", "status": "active", "time_slot": "10:00-19:00"},
-    "S103": {"shift_id": "S103", "courier_id": "123", "warehouse_id": "W1", "date": "2024-07-31", "status": "active", "time_slot": "09:00-18:00"},
-    "S201": {"shift_id": "S201", "courier_id": "456", "warehouse_id": "W2", "date": "2024-07-30", "status": "active", "time_slot": "12:00-21:00"},
-    "S202": {"shift_id": "S202", "courier_id": "456", "warehouse_id": "W2", "date": "2024-07-31", "status": "planned", "time_slot": "12:00-21:00"}, # Запланированная смена
+    "S101": {"shift_id": "S101", "courier_id": "123", "warehouse_id": "W1", "date": "%s" % datetime.now().strftime("%Y-%m-%d") , "status": "active", "time_slot": "09:00-18:00"},
+    "S102": {"shift_id": "S102", "courier_id": "789", "warehouse_id": "W1", "date": "%s" % datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "10:00-19:00"},
+    "S103": {"shift_id": "S103", "courier_id": "123", "warehouse_id": "W1", "date": "%s" % datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "09:00-18:00"},
+    "S201": {"shift_id": "S201", "courier_id": "456", "warehouse_id": "W2", "date": "%s" % datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "12:00-21:00"},
+    "S202": {"shift_id": "S202", "courier_id": "456", "warehouse_id": "W2", "date": "%s" % datetime.now().strftime("%Y-%m-%d"), "status": "planned", "time_slot": "12:00-21:00"}, # Запланированная смена
 }
 
 def search_courier_by_id_or_name(identifier: str) -> dict:
@@ -39,16 +39,6 @@ def search_courier_by_id_or_name(identifier: str) -> dict:
             return {"success": True, "courier_info": found_info}
 
     return {"success": False, "message": f"Курьер с идентификатором '{identifier}' не найден."}
-
-def get_shifts_by_warehouse_id(warehouse_id: str) -> dict:
-    """
-    Получает список активных и запланированных смен для указанног склада.
-    """
-    logger.info(f"[API MOCK][COURIER] Запрос смен для склада: {warehouse_id}")
-    shifts_on_warehouse = [shift for shift in MOCK_SHIFTS_DB.values() if shift["warehouse_id"] == warehouse_id and shift["status"] in ["active", "planned"]]
-    if shifts_on_warehouse:
-        return {"success": True, "shifts": shifts_on_warehouse}
-    return {"success": False, "message": f"Смены для склада '{warehouse_id}' не найдены."}
 
 def get_courier_shifts(courier_id: str, date_str: str = None) -> dict:
     """

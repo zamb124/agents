@@ -6,14 +6,14 @@ from pydantic import BaseModel, Field
 import json
 import logging
 
-from .courier_api import search_courier_by_id_or_name, get_shifts_by_warehouse_id, get_courier_shifts
+from .courier_api import search_courier_by_id_or_name, get_courier_shifts
 from .warehouse_api import get_warehouse_by_director_login
 from .decision_actions import take_action_on_courier
 from .rag_client import query_rag_service
 
 logger = logging.getLogger(__name__)
 
-# Pydantic модели для валидации аргументов инструментов
+
 class SearchCourierInput(BaseModel):
     identifier: str = Field(description="ID или ФИО курьера для поиска.")
 
@@ -36,7 +36,7 @@ class GetCourierShiftsInput(BaseModel):
     date_str: str = Field(default=None, description="Дата в формате YYYY-MM-DD для фильтрации смен. Если не указана, вернутся все активные/запланированные смены курьера.")
 
 
-# Определяем инструменты для Langchain
+
 search_courier_tool = Tool.from_function(
     func=search_courier_by_id_or_name,
     name="search_courier",
@@ -51,7 +51,7 @@ get_warehouse_tool = Tool.from_function(
     args_schema=GetWarehouseInput
 )
 
-# --- ИЗМЕНЕНИЕ: Используем BaseTool для get_courier_shifts ---
+
 class GetCourierShiftsTool(BaseTool):
     name: str = "get_courier_shifts"
     description: str = "Получает список активных или запланированных смен для указанного курьера. Можно указать дату (YYYY-MM-DD) для фильтрации."
@@ -77,7 +77,6 @@ class GetCourierShiftsTool(BaseTool):
         return self._run(courier_id=courier_id, date_str=date_str)
 
 get_courier_shifts_tool = GetCourierShiftsTool()
-# --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
 
 class TakeActionTool(BaseTool):
@@ -127,7 +126,6 @@ take_action_tool = TakeActionTool()
 
 
 async def _query_rag_service_wrapper(tool_input: Any) -> Dict[str, Any]:
-    # ... (этот код остается без изменений) ...
     logger.debug(f"[_query_rag_service_wrapper] Received tool_input: {tool_input} (type: {type(tool_input)})")
     query_text_val: str
     top_k_val: int = 3
@@ -174,7 +172,7 @@ query_rag_tool = Tool.from_function(
 collector_tools = [
     search_courier_tool,
     get_warehouse_tool,
-    get_courier_shifts_tool, # Обновленный инструмент
+    get_courier_shifts_tool,
     query_rag_tool
 ]
 

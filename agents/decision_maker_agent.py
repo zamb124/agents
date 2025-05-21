@@ -1,4 +1,6 @@
 # agents/decision_maker_agent.py
+from datetime import datetime
+
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -15,6 +17,7 @@ llm = ChatOpenAI(model="gpt-4o", temperature=0.2, openai_api_key=OPENAI_API_KEY)
 
 DECISION_MAKER_SYSTEM_PROMPT = """
 Ты - ИИ-агент, ответственный за принятие решений по инцидентам с курьерами.
+Сегодня: %s 
 Ты получаешь на вход структурированную информацию об инциденте в формате JSON. 
 Эта информация включает следующие поля:
 - `courier_id`: ID курьера (строка, если идентифицирован).
@@ -40,7 +43,7 @@ DECISION_MAKER_SYSTEM_PROMPT = """
 
 Входные данные передаются в переменную {{input}} в виде JSON-строки.
 Твой финальный ответ должен быть только сообщением для директора. Не включай в ответ сам JSON.
-"""
+""" % datetime.now().strftime("%Y-%m-%d")
 
 try:
     decision_prompt = ChatPromptTemplate.from_messages([

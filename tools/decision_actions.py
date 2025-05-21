@@ -37,7 +37,7 @@ def take_action_on_courier(action_type: str, courier_id: str, reason: str, shift
             else:
                 message = f"Смена с ID {shift_id} не найдена или не принадлежит курьеру {courier_name} (ID: {courier_id})."
         else: # Если ID смены не указан, пытаемся удалить ближайшую активную/запланированную (упрощенно - первую попавшуюся)
-            # В реальной системе здесь нужна была бы логика определения "ближайшей" смены
+            # В реальной системе здесь нужна была бы логика определения ближайшей смены
             for s_id, shift_data in MOCK_SHIFTS_DB.items():
                 if shift_data["courier_id"] == courier_id and shift_data["status"] in ["active", "planned"]:
                     original_status = shift_data["status"]

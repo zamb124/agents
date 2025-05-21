@@ -1,4 +1,3 @@
-# agents/information_collector_agent.py
 import re
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_functions_agent
@@ -7,7 +6,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from typing import List, Dict, Any
 import json
 import logging
-from datetime import datetime # Для получения текущей даты
+from datetime import datetime
 
 from config import OPENAI_API_KEY
 from tools.tool_definitions import collector_tools
@@ -16,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 COLLECTOR_SYSTEM_PROMPT = """
 Ты - ИИ-агент, первая линия поддержки для директоров магазинов. Твоя задача - собрать всю необходимую информацию об инциденте с курьером.
+Сегодня %s 
 Ты должен:
 1.  Вежливо поприветствовать директора, если это начало диалога.
 2.  Если неясно, о каком курьере идет речь, ЗАДАЙ УТОЧНЯЮЩИЙ ВОПРОС, чтобы получить ФИО или ID курьера. Используй инструмент `search_courier` для проверки существования курьера и получения его точного ID и ФИО.
@@ -32,7 +32,7 @@ COLLECTOR_SYSTEM_PROMPT = """
 8.  Если пользователь просто здоровается или задает общий вопрос, не связанный с инцидентом, отвечай вежливо и будь готов принять жалобу. Не пытайся сразу собирать информацию, если контекст не ясен.
 9.  Не принимай никаких решений о наказаниях! Твоя задача только сбор информации.
 10. Веди диалог естественно. Если информации достаточно, не задавай лишних вопросов.
-"""
+""" % datetime.now().strftime("%Y-%m-%d")
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.1, openai_api_key=OPENAI_API_KEY)
 
@@ -55,7 +55,7 @@ collector_agent_executor = AgentExecutor(
     tools=collector_tools,
     verbose=True,
     handle_parsing_errors=True,
-    max_iterations=10, # Увеличим немного, т.к. добавился шаг
+    max_iterations=10,
     return_intermediate_steps=False
 )
 
@@ -67,13 +67,6 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
     Иначе - 'in_progress' и сообщение для пользователя.
     """
     agent_input_text = user_input
-    # Добавляем текущую дату в контекст для агента, если он ее запросит
-    current_date_str = datetime.now().strftime("%Y-%m-%d")
-    # Можно добавить это в input или в системный промпт, но агент должен сам догадаться спросить или использовать "сегодня"
-    # Пока не будем явно добавлять, посмотрим, справится ли агент с инструкцией "используй текущую дату".
-    # Если нет, можно будет добавить: agent_input_text = f"[Текущая дата: {current_date_str}] {user_input}"
-
-
     langchain_chat_history = []
     for msg in chat_history:
         if msg.get("type") == "human":

@@ -1,25 +1,20 @@
-# rag_server.py
 import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import chromadb
 from chromadb.utils import embedding_functions
-from chromadb.errors import InvalidCollectionException # <--- Импортируем конкретное исключение
+from chromadb.errors import InvalidCollectionException
 import os
 from typing import List, Dict, Optional
 import asyncio
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Конфигурация ---
-# Используем модель, указанную в логах, если она предпочтительнее
-EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-large" # Из лога видно, что эта модель была выбрана
+EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-large"
 CHROMA_DATA_PATH = "chroma_data"
 os.makedirs(CHROMA_DATA_PATH, exist_ok=True)
 
-# --- Инициализация FastAPI и ChromaDB ---
 app = FastAPI(
     title="Simple RAG Service",
     description="RAG service using FastAPI, ChromaDB, and Sentence Transformers for Russian language support.",
@@ -28,27 +23,25 @@ app = FastAPI(
 
 try:
     chroma_client = chromadb.PersistentClient(path=CHROMA_DATA_PATH)
-    logger.info(f"ChromaDB PersistentClient инициализирован. Данные в: {CHROMA_DATA_PATH}")
+    logger.info(f"ChromaDB PersistentClient инициализирован. Данные лежат тут: {CHROMA_DATA_PATH}")
 except Exception as e:
-    logger.error(f"Ошибка инициализации ChromaDB PersistentClient: {e}", exc_info=True)
-    raise RuntimeError(f"Не удалось инициализировать ChromaDB: {e}")
+    logger.error(f"Ошибочка при инициализации ChromaDB PersistentClient: {e}", exc_info=True)
+    raise RuntimeError(f"Не получилось инициализировать ChromaDB: {e}")
 
 try:
     sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL_NAME)
-    logger.info(f"Функция эмбеддингов для модели '{EMBEDDING_MODEL_NAME}' успешно создана.")
+    logger.info(f"Функция эмбедингов для модели '{EMBEDDING_MODEL_NAME}' успешно создана.")
     EMBEDDING_FUNCTION = sentence_transformer_ef
 except Exception as e:
-    logger.error(f"Ошибка при создании функции эмбеддингов SentenceTransformerEmbeddingFunction: {e}", exc_info=True)
-    logger.warning("Попытка использовать DefaultEmbeddingFunction в качестве запасного варианта...")
+    logger.error(f"Ошибка при создании функции эмбедингов SentenceTransformerEmbeddingFunction: {e}", exc_info=True)
+    logger.warning("Пытаемся использовать DefaultEmbeddingFunction как запасной вариант...")
     try:
         EMBEDDING_FUNCTION = embedding_functions.DefaultEmbeddingFunction()
-        logger.info("Используется DefaultEmbeddingFunction (может быть менее точной для русского).")
+        logger.info("Используется DefaultEmbeddingFunction (может быть менее точной для руского).")
     except Exception as e_default:
         logger.error(f"Ошибка при создании DefaultEmbeddingFunction: {e_default}", exc_info=True)
-        raise RuntimeError(f"Не удалось создать ни одну из функций эмбеддингов: {e} / {e_default}")
+        raise RuntimeError(f"Не удалось создать ни одну из функций эмбедингов: {e} / {e_default}")
 
-
-# --- Модели данных Pydantic ---
 class DocumentInput(BaseModel):
     text: str
     metadata: Optional[Dict[str, str]] = None
@@ -72,10 +65,9 @@ class RetrievedChunk(BaseModel):
 class QueryResponse(BaseModel):
     retrieved_chunks: List[RetrievedChunk]
 
-# --- Эндпоинты FastAPI ---
-
 @app.post("/add_documents", summary="Add documents to a ChromaDB collection")
 async def add_documents_to_collection(request: AddDocumentsRequest):
+    """Добовляет документы в коллекцию ChromaDB. Проверяет на дубликаты ID в пакете."""
     try:
         logger.info(f"Запрос на добавление документов в коллекцию: {request.collection_name}")
         collection = chroma_client.get_or_create_collection(
@@ -98,10 +90,10 @@ async def add_documents_to_collection(request: AddDocumentsRequest):
                 unique_docs_to_add.append(docs_to_add[i])
                 unique_metadatas_to_add.append(metadatas_to_add[i])
             else:
-                logger.warning(f"Дублирующийся ID документа '{doc_id}' в пакете, пропущен.")
+                logger.warning(f"Дублирующийся ID документа '{doc_id}' в текущем пакете, пропущен.")
 
         if not unique_ids_to_add:
-            return {"message": "Нет уникальных документов для добавления (возможно, все ID дублируются)."}
+            return {"message": "Нет уникальных документов для добавления (может, все ID дублируюца)."}
 
         collection.add(
             documents=unique_docs_to_add,
@@ -116,6 +108,7 @@ async def add_documents_to_collection(request: AddDocumentsRequest):
 
 @app.post("/query", response_model=QueryResponse, summary="Query a ChromaDB collection")
 async def query_collection(request: QueryRequest):
+    """Выполняет запрос к коллекции ChromaDB и возвращает найденые чанки."""
     try:
         logger.info(f"Запрос к коллекции '{request.collection_name}': '{request.query}', top_k={request.top_k}")
         collection = chroma_client.get_collection(
@@ -140,7 +133,7 @@ async def query_collection(request: QueryRequest):
         logger.info(f"Найдено {len(retrieved_chunks)} чанков для запроса к '{request.collection_name}'.")
         return QueryResponse(retrieved_chunks=retrieved_chunks)
     except InvalidCollectionException:
-        logger.warning(f"Коллекция '{request.collection_name}' не найдена.")
+        logger.warning(f"Коллекция '{request.collection_name}' не найдена. Жаль.")
         return QueryResponse(retrieved_chunks=[])
     except Exception as e:
         logger.error(f"Общая ошибка при выполнении запроса к коллекции '{request.collection_name}': {e}", exc_info=True)
@@ -148,6 +141,7 @@ async def query_collection(request: QueryRequest):
 
 @app.get("/list_collections", summary="List all collections in ChromaDB")
 async def list_collections_endpoint():
+    """Возвращает список всех доступных коллекций в ChromaDB."""
     try:
         collections = chroma_client.list_collections()
         collection_names = [col.name for col in collections]
@@ -158,7 +152,8 @@ async def list_collections_endpoint():
         raise HTTPException(status_code=500, detail=f"Ошибка сервера при получении списка коллекций: {str(e)}")
 
 async def populate_initial_data_async():
-    logger.info("Проверка и наполнение начальными данными...")
+    """Проверяет и наполняет начальными данными коллекции, если они пустые."""
+    logger.info("Проверка и наполнение начальными данными, если надо...")
     collection_names_to_populate = {
         "courier_job_description": [
             DocumentInput(text="Пункт 3.5: Курьеру категорически запрещается находиться на рабочем месте или приступать к выполнению смены в состоянии алкогольного, наркотического или иного токсического опьянения. Любое подозрение должно быть немедленно доложено руководству.", metadata={"source": "Должностная инструкция курьера v1.2", "section": "3. Обязанности и запреты"}, doc_id="courier_instr_3_5"),
@@ -176,20 +171,21 @@ async def populate_initial_data_async():
         try:
             collection = chroma_client.get_collection(name=collection_name, embedding_function=EMBEDDING_FUNCTION)
             if collection.count() == 0:
-                logger.info(f"Коллекция '{collection_name}' пуста. Наполнение...")
+                logger.info(f"Коллекция '{collection_name}' пустая. Наполняем...")
                 await add_documents_to_collection(AddDocumentsRequest(collection_name=collection_name, documents=docs_to_add))
             else:
-                logger.info(f"Коллекция '{collection_name}' уже содержит данные ({collection.count()} документов).")
+                logger.info(f"Коллекция '{collection_name}' уже содержит данные ({collection.count()} документов). Пропускаем.")
         except InvalidCollectionException:
             logger.info(f"Коллекция '{collection_name}' не найдена (InvalidCollectionException). Создание и наполнение...")
             await add_documents_to_collection(AddDocumentsRequest(collection_name=collection_name, documents=docs_to_add))
         except Exception as e:
-            logger.error(f"Ошибка при проверке/наполнении коллекции '{collection_name}': {e}", exc_info=True)
+            logger.error(f"Ошибочка при проверке/наполнении коллекции '{collection_name}': {e}", exc_info=True)
 
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("FastAPI приложение запускается...")
+    """Выполняется при старте FastAPI приложения, наполняет данными если нужно."""
+    logger.info("FastAPI приложение запускаеца...")
     try:
         await populate_initial_data_async()
     except Exception as e:

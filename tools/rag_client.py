@@ -5,62 +5,92 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Флаг для включения/выключения заглушки RAG
-USE_RAG_MOCK = False # Установите в False, когда реальный RAG-сервис будет гщтов
-
+# Моковые выдержки из базы знаний, типа наш RAG для тестов
 MOCKED_KNOWLEDGE_EXTRACTS = {
-    "курьер пьяный": [
-        {"text": "Должностная инструкция, п.3.5: Курьеру запрещается находиться на рабочем месте или приступать к выполнению смены в состоянии алкогольного, наркотического или иного токсического опьянения.", "source": "courier_job_description.txt"},
-        {"text": "Методические рекомендации саппорта, раздел 'Критические нарушения': Появление курьера в нетрезвом виде - немедленное отстранение от смены, удаление текущей смены, блокировка курьера. Запросить фото/видео подтверждение у директора, если возможно.", "source": "support_agent_guidelines.txt"},
-        {"text": "Методические рекомендации саппорта, раздел 'Действия при жалобе на опьянение': 1. Уточнить ФИО курьера и склад. 2. Запросить детали инцидента. 3. Применить санкции согласно правилам (см. 'Критические нарушения').", "source": "support_agent_guidelines.txt"}
-    ],
-    "курьер не вышел на смену": [
-        {"text": "Должностная инструкция, п.4.1: Курьер обязан выходить на запланированные смены вовремя. О невозможности выхода на смену необходимо предупредить диспетчера не менее чем за 2 часа.", "source": "courier_job_description.txt"},
-        {"text": "Методические рекомендации саппорта, раздел 'Невыход на смену': Если курьер не вышел на смену и не предупредил: 1-й случай - удалить смену, зарегистрировать жалобу (страйк). 2-й случай - удалить смену, блокировка на 7 дней. 3-й случай - блокировка навсегда.", "source": "support_agent_guidelines.txt"}
-    ],
-    "default": [
-        {"text": "Общее правило: При любом нарушении должностной инструкции курьером, сотрудник поддержки должен действовать согласно методическим рекомендациям.", "source": "support_agent_guidelines.txt"},
-        {"text": "Важно: Всегда собирайте полную информацию об инциденте перед принятием решения.", "source": "internal_rules.txt"}
+    "courier_job_description": { # Ключ по имени коллекции
+        "пьяный": [
+            {"text": "Должностная инструкция, п.3.5: Курьеру запрещается находиться на рабочем месте или приступать к выполнению смены в состоянии алкогольного, наркотического или иного токсического опьянения.", "source": "courier_job_description.txt"},
+        ],
+        "не вышел": [
+            {"text": "Должностная инструкция, п.4.1: Курьер обязан выходить на запланированные смены вовремя. О невозможности выхода на смену необходимо предупредить диспетчера не менее чем за 2 часа.", "source": "courier_job_description.txt"},
+        ],
+        "default": [ # Если не нашли по ключевым словам
+            {"text": "Общее правило из должностной инструкции: Курьер должен соблюдать все пункты инструкции. Это важно.", "source": "courier_job_description.txt"}
+        ]
+    },
+    "support_agent_guidelines": { # Ключ по имени коллекции
+        "пьяный": [
+            {"text": "Методические рекомендации саппорта, раздел 'Критические нарушения': Появление курьера в нетрезвом виде - немедленное отстранение от смены, удаление текущей смены, блокировка курьера. Запросить фото/видео подтверждение у директора, если возможно.", "source": "support_agent_guidelines.txt"},
+            {"text": "Методические рекомендации саппорта, раздел 'Действия при жалобе на опьянение': 1. Уточнить ФИО курьера и склад. 2. Запросить детали инцидента. 3. Применить санкции согласно правилам (см. 'Критические нарушения').", "source": "support_agent_guidelines.txt"}
+        ],
+        "не вышел": [
+            {"text": "Методические рекомендации саппорта, раздел 'Невыход на смену': Если курьер не вышел на смену и не предупредил: 1-й случай - удалить смену, зарегистрировать жалобу (страйк). 2-й случай - удалить смену, блокировка на 7 дней. 3-й случай - блокировка навсегда.", "source": "support_agent_guidelines.txt"}
+        ],
+        "default": [
+            {"text": "Общее правило из методички: При любом нарушении, сотрудник поддержки должен действовать согласно методическим рекомендациям. Всегда.", "source": "support_agent_guidelines.txt"},
+        ]
+    },
+    "fallback_default": [ # Общий дефолт, если коллекция неизвестна нашему моку
+        {"text": "Важно: Всегда собирайте полную информацию об инциденте перед принятием решения. Не торопитесь.", "source": "internal_rules.txt"}
     ]
 }
 
-async def query_rag_service(query_text: str, top_k: int = 3) -> Dict[str, Any]:
+async def query_rag_service(query_text: str, top_k: int = 3, collection_name: str = "support_agent_guidelines") -> Dict[str, Any]:
     """
-    Отправляет запрос к внешнему RAG-сервису или возвращает моковые данные.
-    Возвращает релевантные фрагменты текста. Если RAG_API_URL не задан, всегда будет мок.
+    Отправляет запрос к RAG-сервису или возвращает моковые данные, если `RAG_API_URL` не задан.
+    Возвращает релевантные фрагменты текста. Типа умный поиск.
     """
-    if USE_RAG_MOCK or not RAG_API_URL:
-        if not RAG_API_URL and not USE_RAG_MOCK:
-            logger.warning("RAG_API_URL не задан, но USE_RAG_MOCK=False. Используется мок RAG.")
+    if not RAG_API_URL: # Если RAG_API_URL не указан, пользуемся моком
+        logger.warning(f"RAG_API_URL не задан. Используется моковый RAG-ответ для коллекции '{collection_name}'. Это для тестов ок.")
 
-        logger.info(f"[RAG MOCK] Запрос: '{query_text}', top_k: {top_k}. Возвращаем моковые данные.")
-        # Простая логика для выбора моковых данных на основе ключевых слов
-        if "пьяный" in query_text.lower() or "нетрезв" in query_text.lower():
-            chunks = MOCKED_KNOWLEDGE_EXTRACTS["курьер пьяный"]
+        # Логика для выбора моковых данных на основе колекции и ключевых слов
+        collection_mock = MOCKED_KNOWLEDGE_EXTRACTS.get(collection_name)
+        if not collection_mock:
+            logger.warning(f"Мок для коллекции '{collection_name}' не найден, используется fallback_default.")
+            chunks = MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]
+        elif "пьяный" in query_text.lower() or "нетрезв" in query_text.lower():
+            chunks = collection_mock.get("пьяный", collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]))
         elif "не вышел" in query_text.lower() or "прогул" in query_text.lower():
-            chunks = MOCKED_KNOWLEDGE_EXTRACTS["курьер не вышел на смену"]
+            chunks = collection_mock.get("не вышел", collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]))
         else:
-            chunks = MOCKED_KNOWLEDGE_EXTRACTS["default"]
+            chunks = collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]) # Дефолтный ответ для коллекции
 
-        return {"success": True, "data": chunks[:top_k]}
+        return {"success": True, "data": chunks[:top_k]} # Возвращаем только top_k результатов
 
-    # Код для реального RAG-сервиса
+    # Код для обращения к нашему FastAPI RAG-сервису
     payload = {
-        "collection_name": "courier_job_description",
-        "query": query_text,
+        "collection_name": collection_name,
+        "query": query_text, # Имя поля в FastAPI сервере - query, а не query_text
         "top_k": top_k
     }
-    logger.info(f"[RAG Client] Запрос к RAG: {RAG_API_URL} с payload: {payload}")
+    logger.info(f"[RAG Client] Запрос к реальному RAG: {RAG_API_URL} с payload: {payload}")
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client: # Таймаут 30 сек
             response = await client.post(RAG_API_URL, json=payload)
-            response.raise_for_status()
+            response.raise_for_status() # Проверка на HTTP ошибки
             result = response.json()
             logger.info(f"[RAG Client] Ответ от RAG: {result}")
-            return {"success": True, "data": result.get("retrieved_chunks", [])}
+
+            agent_formatted_chunks = []
+            if result.get("retrieved_chunks"):
+                for chunk_data in result["retrieved_chunks"]:
+                    source_info = chunk_data.get("metadata", {}).get("source", "RAG DB (источник не указан)")
+                    if chunk_data.get("metadata", {}).get("section"):
+                        source_info += f" (section: {chunk_data['metadata']['section']})"
+                    elif chunk_data.get("metadata", {}).get("topic"):
+                        source_info += f" (topic: {chunk_data['metadata']['topic']})"
+
+                    agent_formatted_chunks.append({
+                        "text": chunk_data["text"],
+                        "source": source_info # Откуда взяли инфу
+                    })
+            return {"success": True, "data": agent_formatted_chunks}
     except httpx.RequestError as e:
         logger.error(f"Ошибка HTTP запроса к RAG сервису {RAG_API_URL}: {e}")
-        return {"success": False, "error": f"Ошибка сети при обращении к RAG: {e}"}
-    except Exception as e:
+        return {"success": False, "error": f"Ошибка сети при обращении к RAG: {e}. Может упал?"}
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Ошибка HTTP статуса от RAG сервиса {RAG_API_URL}: {e.response.status_code} - {e.response.text}")
+        return {"success": False, "error": f"Ошибка от RAG сервиса ({e.response.status_code}): {e.response.text}. Что-то там не так."}
+    except Exception as e: # Какая-то другая неожиданная ошибка
         logger.error(f"Неожиданная ошибка при обращении к RAG сервису {RAG_API_URL}: {e}", exc_info=True)
-        return {"success": False, "error": f"Неожиданная ошибка RAG: {e}"}
+        return {"success": False, "error": f"Неожиданная ошибка RAG: {e}. Разбираца надо."}

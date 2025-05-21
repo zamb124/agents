@@ -18,7 +18,5 @@ def get_warehouse_by_director_login(director_login: str) -> dict:
     if director_login in MOCK_DIRECTORS_DB:
         return {"success": True, "warehouse_info": MOCK_DIRECTORS_DB[director_login]}
 
-    # Если логин директора не найден, можно вернуть дефолтный или ошибку.
-    # В данном случае, если агент не сможет определить склад, он должен будет уточнить у пользавателя.
     logger.warning(f"[API MOCK][WAREHOUSE] Логин директора '{director_login}' не найден в нашей базе.")
     return {"success": False, "message": f"Информация о складе для директора '{director_login}' не найдена. Пожалуйста, уточните название или ID вашего склада."}

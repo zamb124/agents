@@ -15,9 +15,9 @@ MOCK_COURIERS_DB = {
 MOCK_SHIFTS_DB = {
     "S101": {"shift_id": "S101", "courier_id": "123", "warehouse_id": "W1", "date": datetime.now().strftime("%Y-%m-%d") , "status": "active", "time_slot": "09:00-18:00"},
     "S102": {"shift_id": "S102", "courier_id": "789", "warehouse_id": "W1", "date": datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "10:00-19:00"},
-    "S103": {"shift_id": "S103", "courier_id": "123", "warehouse_id": "W1", "date": datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "09:00-18:00"}, # Еще одна смена Иванова на сегодня
+    "S103": {"shift_id": "S103", "courier_id": "123", "warehouse_id": "W1", "date": datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "09:00-18:00"},
     "S201": {"shift_id": "S201", "courier_id": "456", "warehouse_id": "W2", "date": datetime.now().strftime("%Y-%m-%d"), "status": "active", "time_slot": "12:00-21:00"},
-    "S202": {"shift_id": "S202", "courier_id": "456", "warehouse_id": "W2", "date": datetime.now().strftime("%Y-%m-%d"), "status": "planned", "time_slot": "12:00-21:00"}, # Запланированная смена Петрова
+    "S202": {"shift_id": "S202", "courier_id": "456", "warehouse_id": "W2", "date": datetime.now().strftime("%Y-%m-%d"), "status": "planned", "time_slot": "12:00-21:00"},
 }
 
 def search_courier_by_id_or_name(identifier: str) -> dict:
@@ -27,13 +27,13 @@ def search_courier_by_id_or_name(identifier: str) -> dict:
     """
     logger.info(f"[API MOCK][COURIER] Ищем курьера: {identifier}")
     if identifier in MOCK_COURIERS_DB:
-        courier_info = MOCK_COURIERS_DB[identifier].copy() # Копируем, чтоб не попортить оригинал
+        courier_info = MOCK_COURIERS_DB[identifier].copy()
         courier_info["id"] = identifier
         logger.info(f"[API MOCK][COURIER] Курьер найден по ID: {identifier}")
         return {"success": True, "courier_info": courier_info}
 
     for courier_id, info in MOCK_COURIERS_DB.items():
-        if identifier.lower() in info["full_name"].lower(): # Ищем по части имени, регистр не важен
+        if identifier.lower() in info["full_name"].lower():
             found_info = info.copy()
             found_info["id"] = courier_id
             logger.info(f"[API MOCK][COURIER] Курьер найден по имени '{identifier}': {found_info['full_name']} (ID: {courier_id})")
@@ -61,7 +61,6 @@ def get_courier_shifts(courier_id: str, date_str: str = None) -> dict:
 
     if date_str:
         try:
-            # Простая проверочка формата даты, в реальности нужна валидация построже
             datetime.strptime(date_str, "%Y-%m-%d")
             filtered_shifts = [shift for shift in courier_shifts_all if shift["date"] == date_str]
             if not filtered_shifts:

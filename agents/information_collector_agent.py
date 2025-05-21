@@ -2,14 +2,15 @@ import re
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage # AIMessage для истории
+from langchain_core.messages import HumanMessage, AIMessage
 from typing import List, Dict, Any
 import json
 import logging
 from datetime import datetime
 
 from config import OPENAI_API_KEY
-from tools.tool_definitions import collector_tools # Убедимся, что тут все нужные тулзы
+from llm_services import get_llm
+from tools.tool_definitions import collector_tools
 
 logger = logging.getLogger(__name__)
 
@@ -41,37 +42,34 @@ COLLECTOR_SYSTEM_PROMPT = """
 История чата (`chat_history`) будет предоставлена. Используй ее для контекста.
 """ % (datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
 
-# Инициализируем LLM
-llm = ChatOpenAI(model="gpt-4o", temperature=0.1, openai_api_key=OPENAI_API_KEY)
+llm  = get_llm(temperature=0.1)
 
 try:
     collector_prompt = ChatPromptTemplate.from_messages([
         ("system", COLLECTOR_SYSTEM_PROMPT),
-        MessagesPlaceholder(variable_name="chat_history", optional=True), # История чата, может быть пустой
-        ("human", "{input}"), # Текущее сообщение пользователя
-        MessagesPlaceholder(variable_name="agent_scratchpad"), # Для "мыслей" агента
+        MessagesPlaceholder(variable_name="chat_history", optional=True),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
     logger.info(f"Создан `collector_prompt`. Ожидаемые переменные: {collector_prompt.input_variables}")
 except Exception as e:
     logger.error(f"Ошибка при создании ChatPromptTemplate для коллектора информации: {e}", exc_info=True)
     raise
 
-# Создаем runnable агента
 collector_agent_runnable = create_openai_functions_agent(llm, collector_tools, collector_prompt)
 
-# Создаем executor для агента
 collector_agent_executor = AgentExecutor(
     agent=collector_agent_runnable,
     tools=collector_tools,
-    verbose=True, # Полезно для отладки
-    handle_parsing_errors=True, # Автоматическая обработка ошибок парсинга
-    max_iterations=10, # Макс. количество шагов агента (вызовов тулзов)
-    return_intermediate_steps=False # Нам нужен только финальный ответ
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=10,
+    return_intermediate_steps=False
 )
 
 async def run_information_collector(user_input: str, chat_history: List[Dict[str, str]], director_login: str = None) -> Dict[str, Any]:
     """
-    Запускает агента для сбора информации об инциденте.
+    Запускает агента для сбора информацыи об инциденте.
     `user_input`: текущее сообщение от пользователя.
     `chat_history`: список предыдущих сообщений в диалоге.
     `director_login`: логин директора из Telegram.
@@ -79,7 +77,6 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
     """
     agent_input_text = user_input
 
-    # Преобразуем историю чата в формат, понятный Langchain
     langchain_chat_history = []
     for msg in chat_history:
         if msg.get("type") == "human":
@@ -89,16 +86,14 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
 
     agent_invocation_input = {"input": agent_input_text, "chat_history": langchain_chat_history}
 
-    # Добавляем логин директора в начало сообщения, если он есть
     if director_login:
         agent_invocation_input["input"] = f"[Логин директора: {director_login}] {user_input}"
 
     logger.info(f"Запуск InformationCollectorAgent с input: '{agent_invocation_input['input']}' и историей из {len(langchain_chat_history)} сообщений.")
-    # logger.debug(f"Полный input для collector_agent_executor.ainvoke: {json.dumps(agent_invocation_input, indent=2, ensure_ascii=False, default=str)}") # Очень длинный лог может быть
 
     try:
         response = await collector_agent_executor.ainvoke(agent_invocation_input)
-    except Exception as e: # Более общий перехват на случай непредвиденного
+    except Exception as e:
         logger.error(f"Критическая ошибка при вызове collector_agent_executor: {e}", exc_info=True)
         if isinstance(e, KeyError) and hasattr(collector_prompt, 'input_variables'):
             logger.error(f"Ожидаемые переменные промптом collector_prompt: {collector_prompt.input_variables}")
@@ -106,21 +101,18 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
         return {"status": "error", "agent_message": f"Произошла внутренняя ошибка при обработке вашего запроса агентом сбора информации: {e}. Пожалуйста, попробуйте сформулировать запрос иначе или сообщите администратору."}
 
     output = response.get("output", "Извините, не удалось обработать ваш запрос. Попробуйте еще раз.")
-    logger.info(f"InformationCollectorAgent вернул ответ: {output[:300]}...") # Логируем начало ответа
+    logger.info(f"InformationCollectorAgent вернул ответ: {output[:300]}...")
 
     if "[INFO_COLLECTED]" in output:
         try:
-            # Извлекаем часть строки после маркера
             raw_json_payload = output.split("[INFO_COLLECTED]", 1)[1]
 
-            # Пытаемся найти JSON, даже если он в блоке кода ```json ... ```
             json_match = re.search(r"```json\s*([\s\S]*?)\s*```|```\s*([\s\S]*?)\s*```|(\{[\s\S]*\}|\[[\s\S]*\])", raw_json_payload, re.DOTALL)
             json_part = ""
             if json_match:
-                # Берем первую непустую группу из найденного
                 json_part = next(filter(None, json_match.groups()), None)
 
-            if not json_part: # Если regex не сработал, пробуем наивный поиск
+            if not json_part:
                 logger.warning(f"Не удалось извлечь JSON с помощью regex из: '{raw_json_payload[:100]}...'. Пробуем простой поиск начала JSON.")
                 start_brace = raw_json_payload.find('{')
                 start_bracket = raw_json_payload.find('[')
@@ -132,25 +124,22 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
 
                 if start_index != -1:
                     json_candidate = raw_json_payload[start_index:]
-                    # Пытаемся найти соответствующую закрывающую скобку (очень упрощенно)
-                    # Для сложных JSON это может не сработать идеально
                     end_brace = json_candidate.rfind('}')
                     end_bracket = json_candidate.rfind(']')
                     end_index = max(end_brace, end_bracket)
                     if end_index != -1:
                         json_part = json_candidate[:end_index+1].strip()
                     else:
-                        json_part = json_candidate.strip() # Если не нашли закрывающую, берем все до конца
+                        json_part = json_candidate.strip()
                 else:
                     logger.error(f"Не удалось найти начало JSON ('{{' или '[') в '{raw_json_payload[:100]}...'")
 
             if not json_part:
                 logger.error(f"Не удалось извлечь JSON-строку из output после [INFO_COLLECTED]. Output: {output[:300]}...")
-                pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip() # Текст до маркера
-                # Возвращаем текст до маркера, если он есть, иначе стандартное сообщение
+                pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
                 return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else "Агент вернул данные в неверном формате. Попробуйте уточнить запрос."}
 
-            json_part = json_part.strip() # Убираем лишние пробелы
+            json_part = json_part.strip()
             logger.debug(f"Извлеченная строка для парсинга JSON: '{json_part}'")
 
             try:
@@ -158,19 +147,17 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
             except json.JSONDecodeError as e_json:
                 logger.warning(f"Ошибка парсинга JSON ({e_json}) от LLM, пробую исправить некоторые частые проблемы: {json_part[:100]}...")
                 try:
-                    # Попытки "подлечить" JSON от LLM
                     corrected_json_str = json_part.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
-                    corrected_json_str = re.sub(r",\s*([\}\]])", r"\1", corrected_json_str) # Убрать висячие запятые
-                    corrected_json_str = re.sub(r"//.*", "", corrected_json_str) # Убрать однострочные комментарии //
-                    corrected_json_str = re.sub(r"/\*[\s\S]*?\*/", "", corrected_json_str) # Убрать многострочные комментарии /* ... */
+                    corrected_json_str = re.sub(r",\s*([\}\]])", r"\1", corrected_json_str)
+                    corrected_json_str = re.sub(r"//.*", "", corrected_json_str)
+                    corrected_json_str = re.sub(r"/\*[\s\S]*?\*/", "", corrected_json_str)
                     collected_data = json.loads(corrected_json_str)
                     logger.info("JSON успешно распарсен после исправлений.")
                 except json.JSONDecodeError as e_json_corrected:
                     logger.error(f"Повторная ошибка парсинга JSON после попытки исправления: {e_json_corrected}. Оригинальный output: {output[:300]}...", exc_info=True)
                     pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
-                    return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else output} # Возвращаем как есть или часть до маркера
+                    return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else output}
 
-            # Проверка наличия ключевых полей (можно расширить)
             required_keys = ["courier_id", "incident_description", "incident_date", "courier_had_shift_on_incident_date", "job_instruction_extracts"]
             if not isinstance(collected_data, dict) or not all(key in collected_data for key in required_keys):
                 missing_keys = [key for key in required_keys if key not in collected_data] if isinstance(collected_data, dict) else required_keys
@@ -178,14 +165,12 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
                 pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
                 return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else "Кажется, я не смог полностью извлечь детали инцидента. Пожалуйста, попробуйте описать ситуацию еще раз, возможно, более подробно."}
 
-            # Если все ок, возвращаем статус "completed" и собранные данные
             logger.info("Информация успешно собрана и распарсена.")
             return {"status": "completed", "data": collected_data, "agent_message": "Информация собрана. Передаю для анализа и принятия решения."}
 
-        except Exception as e: # Если любая другая ошибка при обработке JSON
+        except Exception as e:
             logger.error(f"Неожиданная ошибка при обработке JSON-части от InformationCollectorAgent: {e}. Output: {output[:300]}...", exc_info=True)
             pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
-            return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else output} # Возвращаем как есть или часть до маркера
+            return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else output}
     else:
-        # Если маркера [INFO_COLLECTED] нет, значит агент продолжает диалог или задает уточняющие вопросы
         return {"status": "in_progress", "agent_message": output}

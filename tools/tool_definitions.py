@@ -63,7 +63,6 @@ class GetCourierShiftsTool(BaseTool):
     async def _arun(self, courier_id: str, date_str: str = None, **kwargs) -> Dict[str, Any]:
         logger.info(f"[{self.name}._arun] Вызван асинхронно (вызывает _run) с: courier_id={courier_id}, date_str={date_str}")
         if kwargs: logger.warning(f"[{self.name}._arun] Получены неожиданные kwargs: {kwargs}")
-        # Для этого мока можно просто вызвать синхронный метод, в реальных IO-bound задачах так делать не стоит
         return self._run(courier_id=courier_id, date_str=date_str)
 
 get_courier_shifts_tool = GetCourierShiftsTool()
@@ -100,27 +99,21 @@ class QueryKnowledgeBaseTool(BaseTool):
     args_schema: Type[BaseModel] = QueryRAGInput
 
     def _run(self, query_text: str, collection_name: str, top_k: int = 3, **kwargs) -> Dict[str, Any]:
-        # Эта тулза по-хорошему должна быть асинхронной, так как query_rag_service асинхронный.
-        # Запуск через asyncio.run() в синхронном методе - не лучшая практика, если есть внешний event loop.
         logger.warning(f"[{self.name}._run] Синхронный вызов асинхронной по сути тулзы. Запускаю _arun через asyncio.run().")
         if kwargs:
             logger.warning(f"[{self.name}._run] Получены неожиданные kwargs: {kwargs}")
         try:
-            # Проверяем, есть ли уже запущенный цикл событий
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Если цикл уже запущен (например в FastAPI или Jupyter), asyncio.run вызовет ошибку.
-                # Это более сложный сценарий, _run не должен вызываться в таком контексте для async-only tool.
                 logger.error(f"[{self.name}._run] Обнаружен запущенный event loop. Такой синхронный вызов не сработает.")
                 raise NotImplementedError(f"{self.name} - это асинхронный инструмент и не может быть корректно вызван синхронно из уже запущенного event loop.")
             else:
-                # Если нет запущенного цикла, можно безопасно использовать asyncio.run()
                 return asyncio.run(self._arun(query_text=query_text, collection_name=collection_name, top_k=top_k))
         except RuntimeError as e:
-            if "cannot be called from a running event loop" in str(e) or "asyncio.run() cannot be called from a running event loop" in str(e) : # Добавил еще один вариант ошибки
+            if "cannot be called from a running event loop" in str(e) or "asyncio.run() cannot be called from a running event loop" in str(e) :
                 logger.error(f"[{self.name}._run] RuntimeError: Нельзя вызывать asyncio.run из уже запущенного event loop. Инструмент предназначен для асинхронного использования.")
                 raise NotImplementedError(f"{self.name} - это асинхронный инструмент и не может быть вызван синхронно из запущенного event loop.")
-            raise e # Перебрасываем другие RuntimeError
+            raise e
 
     async def _arun(self, query_text: str, collection_name: str, top_k: int = 3, **kwargs) -> Dict[str, Any]:
         logger.info(
@@ -130,7 +123,7 @@ class QueryKnowledgeBaseTool(BaseTool):
         if kwargs:
             logger.warning(f"[{self.name}._arun] Получены неожиданные kwargs: {kwargs}")
 
-        return await query_rag_service( # Вызываем нашу асинхронную функцию RAG клиента
+        return await query_rag_service(
             query_text=query_text,
             top_k=top_k,
             collection_name=collection_name
@@ -144,11 +137,11 @@ collector_tools = [
     search_courier_tool,
     get_warehouse_tool,
     get_courier_shifts_tool,
-    query_rag_tool # Добавляем RAG и сюда, для поиска в должностных инструкциях
+    query_rag_tool
 ]
 
 # Инструменты для агента-принимающего решения
 decision_tools = [
     take_action_tool,
-    query_rag_tool # RAG нужен и здесь, для поиска в методичках саппорта
+    query_rag_tool
 ]

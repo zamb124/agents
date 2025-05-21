@@ -7,18 +7,18 @@ logger = logging.getLogger(__name__)
 
 # Моковые выдержки из базы знаний, типа наш RAG для тестов
 MOCKED_KNOWLEDGE_EXTRACTS = {
-    "courier_job_description": { # Ключ по имени коллекции
+    "courier_job_description": {
         "пьяный": [
             {"text": "Должностная инструкция, п.3.5: Курьеру запрещается находиться на рабочем месте или приступать к выполнению смены в состоянии алкогольного, наркотического или иного токсического опьянения.", "source": "courier_job_description.txt"},
         ],
         "не вышел": [
             {"text": "Должностная инструкция, п.4.1: Курьер обязан выходить на запланированные смены вовремя. О невозможности выхода на смену необходимо предупредить диспетчера не менее чем за 2 часа.", "source": "courier_job_description.txt"},
         ],
-        "default": [ # Если не нашли по ключевым словам
+        "default": [
             {"text": "Общее правило из должностной инструкции: Курьер должен соблюдать все пункты инструкции. Это важно.", "source": "courier_job_description.txt"}
         ]
     },
-    "support_agent_guidelines": { # Ключ по имени коллекции
+    "support_agent_guidelines": {
         "пьяный": [
             {"text": "Методические рекомендации саппорта, раздел 'Критические нарушения': Появление курьера в нетрезвом виде - немедленное отстранение от смены, удаление текущей смены, блокировка курьера. Запросить фото/видео подтверждение у директора, если возможно.", "source": "support_agent_guidelines.txt"},
             {"text": "Методические рекомендации саппорта, раздел 'Действия при жалобе на опьянение': 1. Уточнить ФИО курьера и склад. 2. Запросить детали инцидента. 3. Применить санкции согласно правилам (см. 'Критические нарушения').", "source": "support_agent_guidelines.txt"}
@@ -30,7 +30,7 @@ MOCKED_KNOWLEDGE_EXTRACTS = {
             {"text": "Общее правило из методички: При любом нарушении, сотрудник поддержки должен действовать согласно методическим рекомендациям. Всегда.", "source": "support_agent_guidelines.txt"},
         ]
     },
-    "fallback_default": [ # Общий дефолт, если коллекция неизвестна нашему моку
+    "fallback_default": [
         {"text": "Важно: Всегда собирайте полную информацию об инциденте перед принятием решения. Не торопитесь.", "source": "internal_rules.txt"}
     ]
 }
@@ -40,10 +40,9 @@ async def query_rag_service(query_text: str, top_k: int = 3, collection_name: st
     Отправляет запрос к RAG-сервису или возвращает моковые данные, если `RAG_API_URL` не задан.
     Возвращает релевантные фрагменты текста. Типа умный поиск.
     """
-    if not RAG_API_URL: # Если RAG_API_URL не указан, пользуемся моком
+    if not RAG_API_URL:
         logger.warning(f"RAG_API_URL не задан. Используется моковый RAG-ответ для коллекции '{collection_name}'. Это для тестов ок.")
 
-        # Логика для выбора моковых данных на основе колекции и ключевых слов
         collection_mock = MOCKED_KNOWLEDGE_EXTRACTS.get(collection_name)
         if not collection_mock:
             logger.warning(f"Мок для коллекции '{collection_name}' не найден, используется fallback_default.")
@@ -53,21 +52,20 @@ async def query_rag_service(query_text: str, top_k: int = 3, collection_name: st
         elif "не вышел" in query_text.lower() or "прогул" in query_text.lower():
             chunks = collection_mock.get("не вышел", collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]))
         else:
-            chunks = collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"]) # Дефолтный ответ для коллекции
+            chunks = collection_mock.get("default", MOCKED_KNOWLEDGE_EXTRACTS["fallback_default"])
 
-        return {"success": True, "data": chunks[:top_k]} # Возвращаем только top_k результатов
+        return {"success": True, "data": chunks[:top_k]}
 
-    # Код для обращения к нашему FastAPI RAG-сервису
     payload = {
         "collection_name": collection_name,
-        "query": query_text, # Имя поля в FastAPI сервере - query, а не query_text
+        "query": query_text,
         "top_k": top_k
     }
     logger.info(f"[RAG Client] Запрос к реальному RAG: {RAG_API_URL} с payload: {payload}")
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client: # Таймаут 30 сек
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(RAG_API_URL, json=payload)
-            response.raise_for_status() # Проверка на HTTP ошибки
+            response.raise_for_status()
             result = response.json()
             logger.info(f"[RAG Client] Ответ от RAG: {result}")
 
@@ -82,7 +80,7 @@ async def query_rag_service(query_text: str, top_k: int = 3, collection_name: st
 
                     agent_formatted_chunks.append({
                         "text": chunk_data["text"],
-                        "source": source_info # Откуда взяли инфу
+                        "source": source_info
                     })
             return {"success": True, "data": agent_formatted_chunks}
     except httpx.RequestError as e:
@@ -91,6 +89,6 @@ async def query_rag_service(query_text: str, top_k: int = 3, collection_name: st
     except httpx.HTTPStatusError as e:
         logger.error(f"Ошибка HTTP статуса от RAG сервиса {RAG_API_URL}: {e.response.status_code} - {e.response.text}")
         return {"success": False, "error": f"Ошибка от RAG сервиса ({e.response.status_code}): {e.response.text}. Что-то там не так."}
-    except Exception as e: # Какая-то другая неожиданная ошибка
+    except Exception as e:
         logger.error(f"Неожиданная ошибка при обращении к RAG сервису {RAG_API_URL}: {e}", exc_info=True)
         return {"success": False, "error": f"Неожиданная ошибка RAG: {e}. Разбираца надо."}

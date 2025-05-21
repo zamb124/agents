@@ -1,3 +1,4 @@
+# tools/tool_definitions.py
 from langchain.tools import Tool
 from langchain_core.tools import BaseTool
 from typing import Type, List, Dict, Any
@@ -5,7 +6,7 @@ from pydantic import BaseModel, Field
 import json
 import logging
 
-from .courier_api import search_courier_by_id_or_name
+from .courier_api import search_courier_by_id_or_name, get_shifts_by_warehouse_id, get_courier_shifts
 from .warehouse_api import get_warehouse_by_director_login
 from .decision_actions import take_action_on_courier
 from .rag_client import query_rag_service
@@ -23,12 +24,16 @@ class TakeActionInput(BaseModel):
     action_type: str = Field(description="Тип действия: 'delete_shift', 'ban_courier', 'log_complaint'.")
     courier_id: str = Field(description="ID курьера, к которому применяется действие.")
     reason: str = Field(description="Подробное описание причины действия/инцидента, основанное на правилах и фактах.")
-    shift_id: str = Field(default=None, description="ID смены (желателен для action_type='delete_shift', если известна конкретная смена).")
-    warehouse_id: str = Field(default=None, description="ID склада (может быть полезен для 'delete_shift').")
+    shift_id: str = Field(default=None, description="ID конкретной смены для действия (например, для 'delete_shift'). Если не указан, может быть выбрана ближайшая смена.")
+    warehouse_id: str = Field(default=None, description="ID склада (вспомогательная информация, может быть не обязательна, если есть shift_id).")
 
 class QueryRAGInput(BaseModel):
     query_text: str = Field(description="Текстовый запрос (описание проблемы или вопрос) для поиска релевантной информации в базе знаний (должностные инструкции, методички).")
     top_k: int = Field(default=3, description="Количество наиболее релевантных фрагментов для возврата.")
+
+class GetCourierShiftsInput(BaseModel):
+    courier_id: str = Field(description="ID курьера для поиска его смен.")
+    date_str: str = Field(default=None, description="Дата в формате YYYY-MM-DD для фильтрации смен. Если не указана, вернутся все активные/запланированные смены курьера.")
 
 
 # Определяем инструменты для Langchain
@@ -46,13 +51,41 @@ get_warehouse_tool = Tool.from_function(
     args_schema=GetWarehouseInput
 )
 
+# --- ИЗМЕНЕНИЕ: Используем BaseTool для get_courier_shifts ---
+class GetCourierShiftsTool(BaseTool):
+    name: str = "get_courier_shifts"
+    description: str = "Получает список активных или запланированных смен для указанного курьера. Можно указать дату (YYYY-MM-DD) для фильтрации."
+    args_schema: Type[BaseModel] = GetCourierShiftsInput
+
+    def _run(self, courier_id: str, date_str: str = None, **kwargs) -> Dict[str, Any]:
+        logger.info(
+            f"[{self.name}._run] Invoked with: "
+            f"courier_id={courier_id}, date_str={date_str}"
+        )
+        if kwargs:
+            logger.warning(f"[{self.name}._run] Received unexpected kwargs: {kwargs}")
+        return get_courier_shifts(courier_id=courier_id, date_str=date_str)
+
+    async def _arun(self, courier_id: str, date_str: str = None, **kwargs) -> Dict[str, Any]:
+        logger.info(
+            f"[{self.name}._arun] Invoked (calling _run) with: "
+            f"courier_id={courier_id}, date_str={date_str}"
+        )
+        if kwargs:
+            logger.warning(f"[{self.name}._arun] Received unexpected kwargs: {kwargs}")
+        # Поскольку get_courier_shifts синхронная, вызываем _run
+        return self._run(courier_id=courier_id, date_str=date_str)
+
+get_courier_shifts_tool = GetCourierShiftsTool()
+# --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+
 class TakeActionTool(BaseTool):
     name: str = "take_action_on_courier"
     description: str = (
         "Используется для выполнения одного из следующих действий: 'delete_shift' (удалить смену курьера), "
         "'ban_courier' (заблокировать курьера), 'log_complaint' (зарегистрировать жалобу на курьера). "
-        "Всегда указывай причину. Для 'delete_shift' желательно указать shift_id и warehouse_id, если они известны. "
-        "Аргументы должны передаваться как именованные параметры, соответствующие схеме."
+        "Всегда указывай причину. Для 'delete_shift' желательно указать shift_id конкретной смены, если она известна и должна быть удалена."
     )
     args_schema: Type[BaseModel] = TakeActionInput
 
@@ -79,10 +112,10 @@ class TakeActionTool(BaseTool):
             f"action_type={action_type}, courier_id={courier_id}, reason='{reason[:50]}...', "
             f"shift_id={shift_id}, warehouse_id={warehouse_id}"
         )
-        if kwargs: # на всякий случай
+        if kwargs:
             logger.warning(f"[{self.name}._arun] Received unexpected kwargs: {kwargs}")
 
-        return self._run( # вызываем синхронный метод _run
+        return self._run(
             action_type=action_type,
             courier_id=courier_id,
             reason=reason,
@@ -94,13 +127,14 @@ take_action_tool = TakeActionTool()
 
 
 async def _query_rag_service_wrapper(tool_input: Any) -> Dict[str, Any]:
+    # ... (этот код остается без изменений) ...
     logger.debug(f"[_query_rag_service_wrapper] Received tool_input: {tool_input} (type: {type(tool_input)})")
     query_text_val: str
     top_k_val: int = 3
     if isinstance(tool_input, dict):
         query_text_val = tool_input.get("query_text")
         top_k_val = tool_input.get("top_k", 3)
-        if not query_text_val: # проверка на пустой query_text
+        if not query_text_val:
             logger.error(f"[_query_rag_service_wrapper] 'query_text' not found in tool_input dictionary: {tool_input}")
             return {"success": False, "error": "Ошибка входных данных: отсутствует 'query_text'."}
     elif isinstance(tool_input, str):
@@ -140,6 +174,7 @@ query_rag_tool = Tool.from_function(
 collector_tools = [
     search_courier_tool,
     get_warehouse_tool,
+    get_courier_shifts_tool, # Обновленный инструмент
     query_rag_tool
 ]
 

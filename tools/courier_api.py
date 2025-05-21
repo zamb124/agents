@@ -1,4 +1,6 @@
+# tools/courier_api.py
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -12,13 +14,11 @@ MOCK_COURIERS_DB = {
 
 # Мок базы данных смен
 MOCK_SHIFTS_DB = {
-    "W1": [
-        {"shift_id": "S101", "courier_id": "123", "date": "2024-07-30", "status": "active"},
-        {"shift_id": "S102", "courier_id": "789", "date": "2024-07-30", "status": "active"},
-    ],
-    "W2": [
-        {"shift_id": "S201", "courier_id": "456", "date": "2024-07-30", "status": "active"},
-    ]
+    "S101": {"shift_id": "S101", "courier_id": "123", "warehouse_id": "W1", "date": "2024-07-30", "status": "active", "time_slot": "09:00-18:00"},
+    "S102": {"shift_id": "S102", "courier_id": "789", "warehouse_id": "W1", "date": "2024-07-30", "status": "active", "time_slot": "10:00-19:00"},
+    "S103": {"shift_id": "S103", "courier_id": "123", "warehouse_id": "W1", "date": "2024-07-31", "status": "active", "time_slot": "09:00-18:00"},
+    "S201": {"shift_id": "S201", "courier_id": "456", "warehouse_id": "W2", "date": "2024-07-30", "status": "active", "time_slot": "12:00-21:00"},
+    "S202": {"shift_id": "S202", "courier_id": "456", "warehouse_id": "W2", "date": "2024-07-31", "status": "planned", "time_slot": "12:00-21:00"}, # Запланированная смена
 }
 
 def search_courier_by_id_or_name(identifier: str) -> dict:
@@ -27,27 +27,55 @@ def search_courier_by_id_or_name(identifier: str) -> dict:
     Возвращает информациею о курьере или саобщение об ошибке.
     """
     logger.info(f"[API MOCK][COURIER] Поиск курьера: {identifier}")
-    # Поиск по ID
     if identifier in MOCK_COURIERS_DB:
         courier_info = MOCK_COURIERS_DB[identifier].copy()
-        courier_info["id"] = identifier 
+        courier_info["id"] = identifier
         return {"success": True, "courier_info": courier_info}
 
-    # Поиск по ФИО (упрощенный, частичное совпадение без учета регистра)
     for courier_id, info in MOCK_COURIERS_DB.items():
         if identifier.lower() in info["full_name"].lower():
             found_info = info.copy()
-            found_info["id"] = courier_id 
+            found_info["id"] = courier_id
             return {"success": True, "courier_info": found_info}
 
     return {"success": False, "message": f"Курьер с идентификатором '{identifier}' не найден."}
 
 def get_shifts_by_warehouse_id(warehouse_id: str) -> dict:
     """
-    Получает список активных смен для указанног склада.
-    (В текущей реализации возвращает все смены, фильтрация по статусу не добавлена для прастаты)
+    Получает список активных и запланированных смен для указанног склада.
     """
     logger.info(f"[API MOCK][COURIER] Запрос смен для склада: {warehouse_id}")
-    if warehouse_id in MOCK_SHIFTS_DB:
-        return {"success": True, "shifts": MOCK_SHIFTS_DB[warehouse_id]}
+    shifts_on_warehouse = [shift for shift in MOCK_SHIFTS_DB.values() if shift["warehouse_id"] == warehouse_id and shift["status"] in ["active", "planned"]]
+    if shifts_on_warehouse:
+        return {"success": True, "shifts": shifts_on_warehouse}
     return {"success": False, "message": f"Смены для склада '{warehouse_id}' не найдены."}
+
+def get_courier_shifts(courier_id: str, date_str: str = None) -> dict:
+    """
+    Получает смены для конкретного курьера.
+    Если указана date_str (в формате YYYY-MM-DD), фильтрует по этой дате.
+    Возвращает только активные или запланированные смены.
+    """
+    logger.info(f"[API MOCK][COURIER] Запрос смен для курьера ID: {courier_id}, дата: {date_str}")
+    if courier_id not in MOCK_COURIERS_DB:
+        return {"success": False, "message": f"Курьер с ID {courier_id} не найден."}
+
+    courier_shifts_all = [shift for shift in MOCK_SHIFTS_DB.values() if shift["courier_id"] == courier_id and shift["status"] in ["active", "planned"]]
+
+    if not courier_shifts_all:
+        return {"success": True, "shifts": [], "message": f"У курьера {MOCK_COURIERS_DB[courier_id]['full_name']} (ID: {courier_id}) нет активных или запланированных смен."}
+
+    if date_str:
+        try:
+            # Простая проверка формата даты, в реальности нужна более строгая валидация
+            datetime.strptime(date_str, "%Y-%m-%d")
+            filtered_shifts = [shift for shift in courier_shifts_all if shift["date"] == date_str]
+            if not filtered_shifts:
+                return {"success": True, "shifts": [], "message": f"У курьера {MOCK_COURIERS_DB[courier_id]['full_name']} (ID: {courier_id}) нет активных или запланированных смен на дату {date_str}."}
+            return {"success": True, "shifts": filtered_shifts}
+        except ValueError:
+            logger.warning(f"Неверный формат даты: {date_str}. Возвращаем все смены курьера.")
+            return {"success": True, "shifts": courier_shifts_all, "message": f"Дата {date_str} указана некорректно, возвращены все смены курьера."}
+
+
+    return {"success": True, "shifts": courier_shifts_all}

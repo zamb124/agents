@@ -1,3 +1,4 @@
+# agents/information_collector_agent.py
 import re
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_functions_agent
@@ -6,6 +7,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from typing import List, Dict, Any
 import json
 import logging
+from datetime import datetime # Для получения текущей даты
 
 from config import OPENAI_API_KEY
 from tools.tool_definitions import collector_tools
@@ -17,16 +19,19 @@ COLLECTOR_SYSTEM_PROMPT = """
 Ты должен:
 1.  Вежливо поприветствовать директора, если это начало диалога.
 2.  Если неясно, о каком курьере идет речь, ЗАДАЙ УТОЧНЯЮЩИЙ ВОПРОС, чтобы получить ФИО или ID курьера. Используй инструмент `search_courier` для проверки существования курьера и получения его точного ID и ФИО.
-3.  Если директор не указал свой склад, а это необходимо для контекста, ты можешь попытаться определить склад по его логину (telegram username) с помощью инструмента `get_warehouse_by_director_login`.
-4.  Собери всю необходимую информацию об инциденте: что именно произошло, когда (дата, время, если применимо), где (название склада или адрес, если применимо). Задавай уточняющие вопросы, если детали не ясны.
-5.  Используй инструмент `query_knowledge_base`, чтобы найти релевантные выдержки из должностной инструкции курьера и методических рекомендаций саппорта, касающиеся описанной проблемы. Передай описание проблемы в `query_text`.
-6.  Твоя конечная цель - собрать полный пакет информации. Когда ты считаешь, что вся необходимая информация собрана (ID курьера, ФИО, описание инцидента, дата/время, склад, выдержки из базы знаний), ты должен СФОРМУЛИРОВАТЬ ИТОГОВЫЙ ОТВЕТ, содержащий специальный маркер `[INFO_COLLECTED]` и после него JSON-объект со всей собранной информацией.
-    Структура JSON должна включать поля, такие как: `courier_id` (если найден), `courier_name` (если найден), `warehouse_id`, `warehouse_name`, `incident_description`, `incident_date_time`, `knowledge_extracts`.
-    Поле `knowledge_extracts` должно быть списком объектов, каждый из которых содержит `text` и `source`.
-    Убедись, что в JSON есть `courier_id` и `courier_name`, если они были найдены. Если курьер не найден, укажи это (например, значение null или пропусти поле).
-7.  Если пользователь просто здоровается или задает общий вопрос, не связанный с инцидентом, отвечай вежливо и будь готов принять жалобу. Не пытайся сразу собирать информацию, если контекст не ясен.
-8.  Не принимай никаких решений о наказаниях! Твоя задача только сбор информации.
-9.  Веди диалог естественно. Если информации достаточно, не задавай лишних вопросов.
+3.  Если директор не указал свой склад, а это необходимо для контекста, ты можешь попытаться определить склад по его логину (telegram username) с помощью инструмента `get_warehouse_by_director_login`. Если не удалось, уточни у директора.
+4.  Собери всю необходимую информацию об инциденте:
+    - Что именно произошло.
+    - Когда (дата инцидента в формате YYYY-MM-DD, время, если применимо). Если директор говорит "сегодня" или "только что", используй текущую дату. Если дата не ясна, ОБЯЗАТЕЛЬНО уточни ее.
+    - Где (название склада или адрес, если применимо).
+5.  После идентификации курьера и получения даты инцидента, используй инструмент `get_courier_shifts` с ID курьера и датой инцидента (YYYY-MM-DD), чтобы проверить, была ли у курьера смена в этот день. Запомни результат этой проверки (наличие смены, ID смены если есть).
+6.  Используй инструмент `query_knowledge_base`, чтобы найти релевантные выдержки из должностной инструкции курьера и методических рекомендаций саппорта, касающиеся описанной проблемы. Передай описание проблемы в `query_text`.
+7.  Твоя конечная цель - собрать полный пакет информации. Когда ты считаешь, что вся необходимая информация собрана (ID курьера, ФИО, описание инцидента, дата/время инцидента, информация о смене курьера на эту дату (была ли смена, ID смены), склад, выдержки из базы знаний), ты должен СФОРМУЛИРОВАТЬ ИТОГОВЫЙ ОТВЕТ, содержащий специальный маркер `[INFO_COLLECTED]` и после него JSON-объект со всей собранной информацией.
+    Структура JSON должна включать поля, такие как: `courier_id`, `courier_name`, `warehouse_id`, `warehouse_name`, `incident_description`, `incident_date` (YYYY-MM-DD), `incident_time` (если есть), `courier_had_shift_on_incident_date` (boolean), `shift_details` (объект с деталями смены, если была, например `{{"shift_id": "S101", "status": "active"}}` или null), `knowledge_extracts`.
+    Убедись, что в JSON есть `courier_id` и `courier_name`, если они были найдены. Если курьер не найден, укажи это.
+8.  Если пользователь просто здоровается или задает общий вопрос, не связанный с инцидентом, отвечай вежливо и будь готов принять жалобу. Не пытайся сразу собирать информацию, если контекст не ясен.
+9.  Не принимай никаких решений о наказаниях! Твоя задача только сбор информации.
+10. Веди диалог естественно. Если информации достаточно, не задавай лишних вопросов.
 """
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.1, openai_api_key=OPENAI_API_KEY)
@@ -50,7 +55,7 @@ collector_agent_executor = AgentExecutor(
     tools=collector_tools,
     verbose=True,
     handle_parsing_errors=True,
-    max_iterations=8,
+    max_iterations=10, # Увеличим немного, т.к. добавился шаг
     return_intermediate_steps=False
 )
 
@@ -62,6 +67,13 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
     Иначе - 'in_progress' и сообщение для пользователя.
     """
     agent_input_text = user_input
+    # Добавляем текущую дату в контекст для агента, если он ее запросит
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    # Можно добавить это в input или в системный промпт, но агент должен сам догадаться спросить или использовать "сегодня"
+    # Пока не будем явно добавлять, посмотрим, справится ли агент с инструкцией "используй текущую дату".
+    # Если нет, можно будет добавить: agent_input_text = f"[Текущая дата: {current_date_str}] {user_input}"
+
+
     langchain_chat_history = []
     for msg in chat_history:
         if msg.get("type") == "human":
@@ -76,6 +88,9 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
 
     if director_login:
         agent_invocation_input["input"] = f"[Логин директора: {director_login}] {user_input}"
+        # Можно добавить и дату сюда, если агент не справляется
+        # agent_invocation_input["input"] = f"[Логин директора: {director_login}] [Текущая дата: {current_date_str}] {user_input}"
+
 
     logger.info(f"Запуск InformationCollectorAgent с input: '{agent_invocation_input['input']}' и историей: {len(langchain_chat_history)} сообщений")
     logger.debug(f"Полный input для collector_agent_executor.ainvoke: {json.dumps(agent_invocation_input, indent=2, ensure_ascii=False, default=str)}")
@@ -147,8 +162,11 @@ async def run_information_collector(user_input: str, chat_history: List[Dict[str
                     pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
                     return {"status": "in_progress", "agent_message": pre_marker_output if pre_marker_output else output}
 
-            if not isinstance(collected_data, dict) or not collected_data.get("incident_description"):
-                logger.warning(f"В собранных данных отсутствует incident_description или структура не является словарем. Data: {collected_data}")
+            # Проверка наличия ключевых полей
+            required_keys = ["courier_id", "incident_description", "incident_date", "courier_had_shift_on_incident_date"]
+            if not isinstance(collected_data, dict) or not all(key in collected_data for key in required_keys):
+                missing_keys = [key for key in required_keys if key not in collected_data]
+                logger.warning(f"В собранных данных отсутствуют ключевые поля ({missing_keys}) или структура не является словарем. Data: {collected_data}")
                 pre_marker_output = output.split("[INFO_COLLECTED]",1)[0].strip()
                 msg_to_user = pre_marker_output if pre_marker_output else "Кажется, я не смог полностью извлечь детали инцидента. Пожалуйста, попробуйте описать еще раз."
                 return {"status": "in_progress", "agent_message": msg_to_user}

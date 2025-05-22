@@ -97,7 +97,7 @@ class FaqGeneralScenario(BaseScenario):
             rag_response = await query_rag_tool._arun( # Используем инструмент Langchain
                 query_text=user_current_input,
                 collection_name=self.RAG_COLLECTION_NAME,
-                top_k=2 # Возьмем пару чанков для лучшего ответа
+                top_k=20 # Возьмем пару чанков для лучшего ответа
             )
 
             if rag_response and rag_response.get("success") and rag_response.get("data"):

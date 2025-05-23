@@ -40,7 +40,7 @@ async def load_warehouses_if_needed(force_reload: bool = False):
         headers = {'authorization': f'Bearer {config.WMS_TOKEN}'}
         current_warehouses_from_api = {}
         page_count = 0
-        max_pages = 10 # Ограничение для безопасности
+        max_pages = 100 # Ограничение для безопасности
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -57,10 +57,9 @@ async def load_warehouses_if_needed(force_reload: bool = False):
                             if not wh_id: continue
                             current_warehouses_from_api[wh_id] = {
                                 "warehouse_id": wh_id,
-                                "warehouse_name": wh_data.get('title', 'N/A').strip(), # Убираем лишние пробелы
+                                "warehouse_name": wh_data.get('title', 'N/A').strip(),
                                 "city": wh_data.get('vars', {}).get('address_city', 'Город не указан'),
                                 "status": wh_data.get('status', 'unknown'),
-                                "raw_data": wh_data
                             }
                     cursor = result.get('cursor')
                     if cursor: payload['cursor'] = cursor

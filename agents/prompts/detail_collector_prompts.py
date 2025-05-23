@@ -1,123 +1,188 @@
 # agents/prompts/detail_collector_prompts.py
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+import logging
+from typing import Dict, List, Any
 
-# Маркер, который агент должен вернуть, когда все детали собраны
-DETAILS_COLLECTED_MARKER = "[DC_ALL_DETAILS_COLLECTED]" # Оставим этот маркер
+logger = logging.getLogger(__name__)
 
-# Ключи, которые агент должен использовать в своем финальном JSON-результате.
-# Эти же ключи агент может использовать для своего внутреннего "чек-листа" при анализе диалога.
-AGENT_RESULT_FIELDS = {
-    "DESCRIPTION": "incident_description_detailed",
-    "TIME": "incident_time_уточненное",
-    "LOCATION": "incident_location_details",
-    "WITNESSES": "incident_witnesses_additional",
-    "ACTIONS_TAKEN": "actions_taken_immediately",
-    "CONSEQUENCES": "immediate_consequences",
-    "DATE": "incident_date" # Дата инцидента
+# --- Ключи для JSON-объекта, который агент должен вернуть ---
+AGENT_JSON_RESULT_FIELDS = {
+    "courier_id": "courier_id",
+    "courier_name": "courier_name",
+    "warehouse_id": "warehouse_id",
+    "warehouse_name": "warehouse_name",
+    "incident_description": "incident_description",
+    "incident_date": "incident_date",
+    "incident_time": "incident_time",
+    "incident_location": "incident_location",
+    "witnesses_info": "witnesses_info",
+    "director_actions_taken": "director_actions_taken",
+    "incident_consequences": "incident_consequences",
+    "complaint_source_details": "complaint_source_details"
 }
 
-# Описания аспектов для промпта, чтобы LLM знала, что спрашивать
-ASPECT_DESCRIPTIONS_FOR_PROMPT = {
-    AGENT_RESULT_FIELDS["DESCRIPTION"]: "Суть инцидента и как определили нарушение (Что конкретно произошло? Если 'пьяный' - как именно определили: запах, поведение, речь, координация? Кто первый заметил? Были ли другие признаки?)",
-    AGENT_RESULT_FIELDS["TIME"]: "Время инцидента (Уточни ТОЧНОЕ ВРЕМЯ или четкий временной диапазон. 'Утром' - это неточно, спроси конкретнее. Также уточни дату, если она не ясна из контекста или не 'сегодня').",
-    AGENT_RESULT_FIELDS["LOCATION"]: "Место инцидента (Где конкретно это произошло? На складе (в какой зоне?), рядом со складом, на маршруте?)",
-    AGENT_RESULT_FIELDS["WITNESSES"]: "Свидетели (Были ли другие сотрудники или клиенты свидетелями инцидента? Их ФИО или должности, если известны.)",
-    AGENT_RESULT_FIELDS["ACTIONS_TAKEN"]: "Предпринятые действия (Какие действия были предприняты пользователем или другими лицами сразу после обнаружения инцидента?)",
-    AGENT_RESULT_FIELDS["CONSEQUENCES"]: "Последствия (Были ли немедленные последствия инцидента? Жалобы клиентов? Задержки доставок? Повреждение товара?)"
-    # Дата будет частью аспекта "Время" или отдельным уточнением, если необходимо.
-}
+# --- Маркер не используется в этом подходе, т.к. агент сам решает, когда завершать ---
+# DETAILS_COLLECTED_MARKER = "[DETAILS_COLLECTED_BY_AGENT_V4_PYTHON_LOGIC]"
 
-# Основной системный промпт для DetailCollectorAgent
-DC_AUTONOMOUS_SYSTEM_PROMPT = """
-Ты - ИИ-ассистент, методичный следователь, задача которого - собрать ПОДРОБНЫЕ детали инцидента с курьером.
-Ты должен вести диалог с пользователем, последовательно задавая вопросы, чтобы получить информацию по ВСЕМ перечисленным ниже аспектам.
+# --- Конфигурация аспектов для сбора (управляется Python-кодом) ---
+ASPECTS_TO_COLLECT_CONFIG = [
+    {
+        "id": "aspect_what_happened",
+        "description_for_question_generation": "суть инцидента: что именно произошло, какие конкретно действия курьера были неправильными, и как это было замечено директором.",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["incident_description"]],
+        "is_critical": True,
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["incident_description"]: "Полное описание инцидента со слов пользователя"}
+    },
+    {
+        "id": "aspect_when",
+        "description_for_question_generation": "точная дата и время (или временной промежуток), когда произошел инцидент.",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["incident_date"], AGENT_JSON_RESULT_FIELDS["incident_time"]],
+        "is_critical": True,
+        "json_extraction_keys_hint": {
+            AGENT_JSON_RESULT_FIELDS["incident_date"]: "Дата в формате YYYY-MM-DD (если пользователь указал 'сегодня', используй {current_date})",
+            AGENT_JSON_RESULT_FIELDS["incident_time"]: "Время в формате HH:MM или текстовое описание (например, 'утром', 'около 14:00')"
+        }
+    },
+    {
+        "id": "aspect_where",
+        "description_for_question_generation": "конкретное место, где произошел инцидент (например, на территории склада, на маршруте, у клиента по адресу...).",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["incident_location"]],
+        "is_critical": True,
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["incident_location"]: "Описание места инцидента"}
+    },
+    {
+        "id": "aspect_witnesses",
+        "description_for_question_generation": "наличие свидетелей инцидента (если да, то кто именно - ФИО или должность).",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["witnesses_info"]],
+        "is_critical": False,
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["witnesses_info"]: "Информация о свидетелях, либо 'нет', 'не знаю'"}
+    },
+    {
+        "id": "aspect_actions_taken",
+        "description_for_question_generation": "действия, которые предпринял директор или другие сотрудники сразу после того, как стало известно об инциденте.",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["director_actions_taken"]],
+        "is_critical": False,
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["director_actions_taken"]: "Описание предпринятых действий, либо 'никаких'"}
+    },
+    {
+        "id": "aspect_consequences",
+        "description_for_question_generation": "негативные последствия инцидента (например, жалобы от клиентов, задержки в доставках, повреждение товара).",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["incident_consequences"]],
+        "is_critical": False,
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["incident_consequences"]: "Описание последствий, либо 'нет', 'не знаю'"}
+    },
+    {
+        "id": "aspect_complaint_details",
+        "description_for_question_generation": "детали жалоб от клиентов (если они были упомянуты ранее): от кого поступили жалобы и в чем заключалась их суть.",
+        "target_json_fields": [AGENT_JSON_RESULT_FIELDS["complaint_source_details"]],
+        "is_critical": False,
+        "depends_on_field_value": { # Условие для задания этого вопроса
+            "field_key": AGENT_JSON_RESULT_FIELDS["incident_consequences"], # Проверяем это поле в collected_data
+            "contains_keywords": ["жалоб", "клиент", "пожаловался", "недоволен"] # Если значение содержит эти слова
+        },
+        "json_extraction_keys_hint": {AGENT_JSON_RESULT_FIELDS["complaint_source_details"]: "Детали жалобы от клиента, если были"}
+    }
+]
 
-КОНТЕКСТ ИНЦИДЕНТА (предоставлен тебе один раз):
-- Склад: {warehouse_name}
-- Курьер: {courier_name}
-- Первоначальное сообщение от пользователя (может быть кратким или содержать некоторые детали): "{initial_complaint}"
+# --- Промпт №1: Генерация текста вопроса ---
+GENERATE_QUESTION_PROMPT_TEMPLATE = """
+Ты — ИИ-ассистент. Твоя задача — помочь сформулировать вежливый и понятный вопрос для директора магазина.
+Директор предоставляет информацию об инциденте с курьером.
+Текущая дата: {current_date}.
 
-ИСТОРИЯ ТЕКУЩЕГО ДИАЛОГА С ТОБОЙ ПО СБОРУ ДЕТАЛЕЙ (ты - Ассистент):
-{dialog_history_formatted}
+ИСТОРИЯ ДИАЛОГА (предыдущие вопросы этого агента и ответы пользователя):
+{dialog_history_str}
 
-ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ (на которое ты сейчас должен отреагировать):
-"{user_current_reply}"
+КОНТЕКСТ ИНЦИДЕНТА (уже известная информация от других агентов или первоначальная жалоба):
+- Склад: {warehouse_name} (ID: {warehouse_id})
+- Курьер: {courier_name} (ID: {courier_id})
+- Первоначальное описание проблемы (если было): {initial_complaint}
 
-ТВОЙ ПРОЦЕСС РАБОТЫ:
-1.  **Проанализируй ВСЮ ИСТОРИЮ ДИАЛОГА, ПЕРВОНАЧАЛЬНОЕ СООБЩЕНИЕ и ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ.**
-2.  **Определи, по каким из аспектов (описание, время/дата, место, свидетели, действия, последствия) информация УЖЕ БЫЛА ПОЛУЧЕНА** в ходе диалога. Учитывай, что пользователь мог дать информацию сразу по нескольким аспектам в одном сообщении.
-3.  **Выбери ПЕРВЫЙ аспект из списка ниже, по которому информация еще НЕ ПОЛУЧЕНА или недостаточно детализирована.**
-    Порядок проверки и сбора аспектов:
-    - Описание инцидента и как определили нарушение (ключ для JSON: "{key_description}"): {desc_description}
-    - Время и ДАТА инцидента (ключ для JSON: "{key_time}" и "{key_date}"): {desc_time}
-    - Место инцидента (ключ для JSON: "{key_location}"): {desc_location}
-    - Свидетели (ключ для JSON: "{key_witnesses}"): {desc_witnesses}
-    - Предпринятые действия (ключ для JSON: "{key_actions}"): {desc_actions}
-    - Последствия (ключ для JSON: "{key_consequences}"): {desc_consequences}
-4.  **Если есть НЕПОКРЫТЫЕ аспекты:**
-    а. Сформулируй ОДИН КОНКРЕТНЫЙ И ПОНЯТНЫЙ вопрос по первому из них.
-    б. Перед вопросом ты МОЖЕШЬ ОЧЕНЬ кратко подтвердить информацию из последнего сообщения пользователя, если оно было релевантным и понятным (например: "Понял, это было в 10 утра. Теперь скажите, где именно...").
-    в. Твой ответ должен быть ТОЛЬКО этим подтверждением (если есть) и вопросом. НЕ ИСПОЛЬЗУЙ маркер {completion_marker} на этом этапе.
-5.  **Если ты УВЕРЕН, что информация по ВСЕМ аспектам собрана (или пользователь явно сказал "не знаю" / "нет информации" по ним, и это отражено в истории):**
-    а. Сообщи пользователю: "Спасибо, все необходимые детали по инциденту собраны."
-    б. На НОВОЙ строке, СРАЗУ после сообщения: {completion_marker}
-    в. На НОВОЙ строке, СРАЗУ после маркера: JSON-объект. Этот JSON должен содержать ВСЕ следующие ключи с собранной информацией (если по какому-то аспекту информации нет или пользователь не знает, ставь значение null или краткое описание типа "не указано", "свидетелей нет"):
-       - "{key_description}"
-       - "{key_time}"
-       - "{key_location}"
-       - "{key_witnesses}"
-       - "{key_actions}"
-       - "{key_consequences}"
-       - "{key_date}" (Дата инцидента в формате ГГГГ-ММ-ДД. Если пользователь говорит "сегодня", используй {current_date}. Если дата уже упоминалась в диалоге, используй ее. Если не ясна, уточни ее как часть аспекта "Время" или установи null.)
+УЖЕ СОБРАННЫЕ ДЕТАЛИ (ключ: значение):
+{collected_data_str}
 
-ВАЖНО:
-- НЕ ЗАДАВАЙ вопросы по аспектам, информация по которым уже четко дана в ИСТОРИИ ДИАЛОГА или ПОСЛЕДНЕМ СООБЩЕНИИ ПОЛЬЗОВАТЕЛЯ. Твоя задача - быть умным и не повторяться.
-- Если пользователь в одном сообщении отвечает на несколько вопросов или дает много деталей, УЧТИ ВСЮ ЭТУ ИНФОРМАЦИЮ при определении следующего вопроса или решении о завершении.
-- Твоя цель - получить полную картину за минимальное количество логичных шагов.
+Нужно задать вопрос, чтобы узнать у директора о следующем аспекте инцидента:
+"{aspect_description_for_question}"
 
-Текущая дата для справки (используй для "сегодня", если пользователь так говорит): {current_date}
+СФОРМУЛИРУЙ ТОЛЬКО ТЕКСТ ВОПРОСА. Кратко, вежливо и по существу. Не добавляй приветствий или лишних фраз.
+Учитывай уже собранные детали, чтобы вопрос был максимально релевантным и не повторял уже известное.
+Например, если аспект "точное время и дата инцидента", а пользователь уже сказал "сегодня утром", уточни "Когда именно сегодня утром это произошло? Пожалуйста, укажите приблизительное время."
+Если аспект "суть инцидента", а пользователь сказал "пьяный", уточни "Расскажите, пожалуйста, подробнее, как вы это определили (запах, поведение, речь)?".
 """
 
-def format_dialog_history_for_dc_prompt(history: List[Dict[str, str]]) -> str:
-    if not history:
-        return "Это начало сбора деталей по инциденту."
-    formatted_lines = []
-    for item in history:
-        role = "Ассистент (ты)" if item["type"] == "ai" else "Пользователь"
-        formatted_lines.append(f"{role}: {item['content']}")
-    return "\n".join(formatted_lines)
+def get_generate_question_prompt(
+        aspect_description_for_question: str,
+        dialog_history: List[Dict[str, str]],
+        scenario_context: Dict[str, Any],
+        collected_data: Dict[str, Any],
+        current_date: str
+) -> str:
+    history_str = "\n".join([f"- {msg['type'].upper()}: {msg['content']}" for msg in dialog_history]) \
+        if dialog_history else "Пока это первый вопрос по деталям."
 
-def get_detail_collector_prompt(
-        scenario_context: Dict[str, Any], # Содержит warehouse_name, courier_name, initial_complaint
-        agent_dialog_history: List[Dict[str, str]], # История диалога именно этого агента
-        user_current_reply: str # Самое последнее сообщение от пользователя, на которое нужно отреагировать
+    collected_data_parts = []
+    for key, value in collected_data.items():
+        if value is not None:
+            collected_data_parts.append(f"  - {key}: {value}")
+    collected_data_str = "\n".join(collected_data_parts) if collected_data_parts else "Пока нет."
+
+    warehouse_info = scenario_context.get("warehouse_info", {})
+    courier_info = scenario_context.get("courier_info", {})
+
+    return GENERATE_QUESTION_PROMPT_TEMPLATE.format(
+        current_date=current_date,
+        aspect_description_for_question=aspect_description_for_question,
+        dialog_history_str=history_str,
+        warehouse_name=warehouse_info.get("warehouse_name", "N/A"),
+        warehouse_id=warehouse_info.get("warehouse_id", "N/A"),
+        courier_name=courier_info.get("full_name", "N/A"),
+        courier_id=courier_info.get("id", "N/A"),
+        initial_complaint=scenario_context.get("initial_complaint", "не указана"),
+        collected_data_str=collected_data_str
+    )
+
+# --- Промпт №2: Извлечение данных из ответа пользователя ---
+EXTRACT_DATA_PROMPT_TEMPLATE = """
+Ты — ИИ-аналитик. Твоя задача — извлечь структурированную информацию из ответа пользователя на заданный вопрос.
+Текущая дата: {current_date}. Если пользователь говорит "сегодня", это означает {current_date}. Если "вчера" - {yesterday_date}.
+
+Контекст: Директору магазина был задан вопрос об инциденте с курьером.
+Заданный вопрос: "{question_asked_to_user}"
+Ответ пользователя: "{user_reply_text}"
+
+Из ответа пользователя извлеки информацию для следующих полей. Верни JSON-объект.
+Ключи в JSON должны быть ТОЛЬКО из этого списка: {json_keys_for_extraction_str}
+Если информация для какого-то ключа в ответе отсутствует, неясна или пользователь ответил "не знаю", "никаких", "нет", используй значение `null` для этого ключа в JSON.
+Если пользователь дал конкретный негативный ответ (например, "свидетелей не было", "последствий нет"), старайся отразить это в значении (например, "нет", "отсутствуют"), а не просто `null`.
+
+Пример формата значений для ключей (если применимо):
+{json_extraction_keys_hint_str}
+
+ВАЖНО: Твой ответ должен быть ТОЛЬКО JSON-объектом и ничем больше. Не добавляй никаких объяснений или ```json ```.
+"""
+
+def get_extract_data_prompt(
+        question_asked_to_user: str,
+        user_reply_text: str,
+        target_json_fields: List[str],
+        json_extraction_keys_hint: Dict[str, str], # Подсказки для LLM о формате значений
+        current_date: str,
+        yesterday_date: str
 ) -> str:
 
-    # Форматируем историю диалога для вставки в промпт
-    history_str = format_dialog_history_for_dc_prompt(agent_dialog_history)
+    json_keys_for_extraction_str = ", ".join([f'"{k}"' for k in target_json_fields])
 
-    # Подставляем все значения в шаблон
-    return DC_AUTONOMOUS_SYSTEM_PROMPT.format(
-        warehouse_name=scenario_context.get("warehouse_name", "N/A"),
-        courier_name=scenario_context.get("courier_name", "N/A"),
-        initial_complaint=scenario_context.get("initial_complaint", "Жалоба не детализирована."),
-        dialog_history_formatted=history_str,
-        user_current_reply=user_current_reply,
-        current_date=datetime.now().strftime("%Y-%m-%d"),
-        completion_marker=DETAILS_COLLECTED_MARKER,
-        # Передаем ключи и описания аспектов
-        key_description=AGENT_RESULT_FIELDS["DESCRIPTION"],
-        desc_description=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["DESCRIPTION"]],
-        key_time=AGENT_RESULT_FIELDS["TIME"],
-        desc_time=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["TIME"]],
-        key_location=AGENT_RESULT_FIELDS["LOCATION"],
-        desc_location=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["LOCATION"]],
-        key_witnesses=AGENT_RESULT_FIELDS["WITNESSES"],
-        desc_witnesses=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["WITNESSES"]],
-        key_actions=AGENT_RESULT_FIELDS["ACTIONS_TAKEN"],
-        desc_actions=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["ACTIONS_TAKEN"]],
-        key_consequences=AGENT_RESULT_FIELDS["CONSEQUENCES"],
-        desc_consequences=ASPECT_DESCRIPTIONS_FOR_PROMPT[AGENT_RESULT_FIELDS["CONSEQUENCES"]],
-        key_date=AGENT_RESULT_FIELDS["DATE"]
+    hint_parts = []
+    for key, hint_text in json_extraction_keys_hint.items():
+        if key in target_json_fields: # Убедимся, что подсказка для нужного поля
+            hint_parts.append(f"  - \"{key}\": \"{hint_text.replace('{current_date}', current_date)}\"") # Подставляем current_date в подсказку
+    json_extraction_keys_hint_str = "\n".join(hint_parts) if hint_parts else "Нет специальных подсказок по формату."
+
+
+    return EXTRACT_DATA_PROMPT_TEMPLATE.format(
+        current_date=current_date,
+        yesterday_date=yesterday_date,
+        question_asked_to_user=question_asked_to_user,
+        user_reply_text=user_reply_text,
+        json_keys_for_extraction_str=json_keys_for_extraction_str,
+        json_extraction_keys_hint_str=json_extraction_keys_hint_str
     )

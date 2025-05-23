@@ -1,106 +1,162 @@
-from datetime import datetime
-from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from typing import Dict, Any
-import json
+# agents/decision_maker_agent.py
 import logging
+import json
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 
-from config import OPENAI_API_KEY
-from llm_services import get_llm
-from tools.tool_definitions import decision_tools
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder # Оставляем MessagesPlaceholder
+from langchain.agents import AgentExecutor, create_openai_functions_agent
+
+from .base_agent import BaseAgent
+from tools.tool_definitions import take_action_tool, query_rag_tool, get_courier_shifts_tool # Добавили get_courier_shifts_tool
+from .prompts.decision_maker_prompts import get_dm_system_prompt_v2, CONFIRMATION_REQUEST_MARKER # Используем V2
 
 logger = logging.getLogger(__name__)
 
-llm = get_llm(temperature=0.1)
+class DecisionMakerAgent(BaseAgent):
+    agent_id: str = "agent_decision_maker_v2" # Обновим ID для ясности
 
-DECISION_MAKER_SYSTEM_PROMPT = """
-Ты - ИИ-агент, Тебя зовут Васька Помощьник ответственный за принятие решений по инцидентам с курьерами.
-Сегодня: %s 
-Ты получаешь на вход структурированную информацию в переменной {{input}} в виде JSON-строки.
+    def _get_default_tools(self) -> List[Any]: # List[BaseTool]
+        # Теперь DM сам получает смены и инструкции, если нужно
+        return [take_action_tool, query_rag_tool, get_courier_shifts_tool]
 
-Эта JSON-строка может представлять одну из двух структур:
+    def get_initial_state(self, scenario_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # scenario_context здесь будет содержать результат DetailCollector'а
+        # под ключом, определенным в CourierComplaintScenario._get_agents_config()
+        # (например, scenario_context["details_from_collector"])
 
-Структура 1: **Первичный анализ инцидента**.
-(Содержит поля: courier_id, courier_name, warehouse_id, warehouse_name, incident_description, incident_date, incident_time, courier_had_shift_on_incident_date, shift_details, job_instruction_extracts).
+        details_from_collector = None
+        if scenario_context and isinstance(scenario_context.get("details_from_collector"), dict):
+            details_from_collector = scenario_context["details_from_collector"]
 
-Структура 2: **Ответ пользователя на запрос подтверждения**.
-(Содержит ключи: 'initial_incident_payload' со значением Структуры 1, и 'user_confirm_reply' с текстом ответа пользователя).
-
-Твоя задача:
-
-**Если JSON в {{input}} соответствует Структуре 1 (Первичный анализ инцидента):**
-1.  Внимательно проанализируй всю предоставленную информацию из JSON.
-2.  На основе `incident_description` и `job_instruction_extracts` определи суть нарушения.
-3.  Используй инструмент `query_knowledge_base` с `collection_name="support_agent_guidelines"`, чтобы найти МЕТОДИЧЕСКИЕ РЕКОМЕНДАЦИИ САППОРТА о том, какие действия предпринять.
-4.  Определи **ПЛАН ДЕЙСТВИЙ**. Этот план должен описывать, какие вызовы инструмента `take_action_on_courier` ты бы сделал (например, 'delete_shift', 'ban_courier', 'log_complaint') и с какими параметрами. **НА ЭТОМ ЭТАПЕ ТЫ НЕ ДОЛЖЕН ВЫЗЫВАТЬ `take_action_on_courier` САМ.** Твоя задача - только спланировать.
-5.  Сформулируй для директора четкое описание инцидента, твой анализ, и **предлагаемый тобой ПЛАН ДЕЙСТВИЙ** (какие именно действия и почему, со ссылкой на методичку, если применимо).
-6.  В конце своего сообщения ОБЯЗАТЕЛЬНО задай вопрос: "Предлагаю следующие действия: [твой детальный план действий и их обоснование]. Вы подтверждаете выполнение этих действий? Пожалуйста, ответьте 'да' или 'нет'."
-7.  Твой ответ ДОЛЖЕН начинаться со специального маркера: `[CONFIRMATION_REQUEST]` и содержать ТОЛЬКО это описание, предлагаемый план и вопрос. **НЕ ИСПОЛЬЗУЙ инструмент `take_action_on_courier` на этом этапе.**
-8.  Если курьер не идентифицирован или методички не ясны, твой план может быть "зарегистрировать жалобу с такой-то причиной" или "сообщить о невозможности действий". Все равно запроси подтверждение этого плана.
-
-**Если JSON в {{input}} соответствует Структуре 2 (Ответ пользователя на запрос подтверждения):**
-1.  Проанализируй значение ключа 'user_confirm_reply' из JSON.
-2.  Если ответ пользователя интерпретируется как 'да' (например, "да", "подтверждаю", "согласен"):
-    а. Возьми данные из значения ключа 'initial_incident_payload'.
-    б. **Теперь, и только теперь, если в твоем первоначально предложенном и подтвержденном плане были действия, требующие `take_action_on_courier`, ИСПОЛЬЗУЙ инструмент `take_action_on_courier` для их выполнения.** В аргументе `reason` четко укажи причину, как ты планировал. Если для 'delete_shift' был `shift_id` в `initial_incident_payload.shift_details`, используй его.
-    в. Сформулируй финальный ответ для директора, включающий информацию о том, какие действия были **фактически выполнены** (или не выполнены, если таков был план) и их результат. Этот ответ НЕ должен содержать маркер `[CONFIRMATION_REQUEST]`.
-3.  Если ответ пользователя интерпретируется как 'нет' (например, "нет", "не подтверждаю", "отмена"):
-    а. Сообщи директору, что предложенные действия отменены. Никакие действия через `take_action_on_courier` не выполняются. Этот ответ НЕ должен содержать маркер `[CONFIRMATION_REQUEST]`.
-4.  Если ответ пользователя нечеткий: вежливо попроси его уточнить свой ответ ('да' или 'нет') на первоначально предложенный план. Ты можешь кратко напомнить план. Этот ответ ДОЛЖЕН снова начинаться с `[CONFIRMATION_REQUEST]`.
-
-Твой финальный ответ должен быть ТОЛЬКО сообщением для директора.
-""" % datetime.now().strftime("%Y-%m-%d")
-
-
-try:
-    decision_prompt = ChatPromptTemplate.from_messages([
-        ("system", DECISION_MAKER_SYSTEM_PROMPT),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-    logger.info(f"DecisionMakerAgent: `decision_prompt` создан. `input_variables` = {decision_prompt.input_variables}")
-except Exception as e:
-    logger.error(f"Ошибка при создании ChatPromptTemplate для решающего агента: {e}", exc_info=True)
-    raise
-
-decision_agent_runnable = create_openai_functions_agent(llm, decision_tools, decision_prompt)
-
-decision_agent_executor = AgentExecutor(
-    agent=decision_agent_runnable,
-    tools=decision_tools,
-    verbose=True,
-    handle_parsing_errors=True,
-    max_iterations=10
-)
-
-async def run_decision_maker(collected_data: Dict[str, Any], user_confirmation_response: str = None) -> str:
-    if user_confirmation_response:
-        input_payload = {
-            "initial_incident_payload": collected_data, # Ключ соответствует промпту
-            "user_confirm_reply": user_confirmation_response # Ключ соответствует промпту
+        return {
+            # initial_incident_payload будет сформирован на первом шаге process_user_input
+            # и сохранен агентом (через scratchpad/memory Langchain) для второго шага.
+            # Либо, если агент stateless между process_user_input, то сценарий должен передавать
+            # initial_incident_payload на втором шаге.
+            # Промпт V2 предполагает, что initial_incident_payload передается в input для второго шага.
+            "dm_dialog_history": [], # Краткая история диалога с DM (запрос подтверждения -> ответ)
+            "pending_confirmation_payload": None # Здесь будем хранить обогащенный payload, ожидающий подтверждения
         }
-        logger.info(f"Запуск DecisionMakerAgent (этап подтверждения) с ответом пользователя: '{user_confirmation_response}'")
-    else:
-        input_payload = collected_data # Это соответствует Структуре 1 в промпте
-        logger.info("Запуск DecisionMakerAgent (первичный анализ).")
 
-    input_str = json.dumps(input_payload, ensure_ascii=False, indent=2)
-    logger.debug(f"Полный JSON для DecisionMakerAgent:\n{input_str}")
+    async def process_user_input(
+            self, user_input: str, current_agent_state: Dict[str, Any],
+            scenario_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
 
-    invocation_input = {"input": input_str}
-    logger.debug(f"Передаваемый input для decision_agent_executor.ainvoke (ключи): {list(invocation_input.keys())}")
+        pending_confirmation_payload = current_agent_state.get("pending_confirmation_payload")
+        dm_dialog_history = current_agent_state.get("dm_dialog_history", [])
 
-    try:
-        response = await decision_agent_executor.ainvoke(invocation_input)
-    except Exception as e:
-        logger.error(f"Критическая ошибка при вызове decision_agent_executor: {e}", exc_info=True)
-        # Логируем ожидаемые и полученные переменные, если ошибка KeyError и есть input_variables у промпта
-        if isinstance(e, KeyError) and hasattr(decision_prompt, 'input_variables'):
-            logger.error(f"Ожидаемые переменные промптом decision_prompt: {decision_prompt.input_variables}")
-            logger.error(f"Переданный input в executor (ключи): {list(invocation_input.keys())}")
-        return f"Произошла серьезная ошибка при принятии решения агентом: {type(e).__name__} - {e}. Пожалуйста, попробуйте позже или сообщите администратору для проверки логов."
+        input_json_for_langchain_agent: str
+        current_task_description_for_log: str
 
-    output = response.get("output", "К сожалению, не удалось принять однозначное решение. Пожалуйста, обратитесь к администратору для разбора ситуации.")
-    logger.info(f"DecisionMakerAgent завершил работу. Финальный ответ: {output}")
-    return output
+        # scenario_context для DM содержит 'details_from_collector' при первом вызове
+        # и 'current_date'
+        current_date_str = scenario_context.get("current_date", datetime.now().strftime("%Y-%m-%d"))
+
+
+        if pending_confirmation_payload is None: # Первый вызов DM
+            # user_input здесь - это JSON от DetailCollector (или пустая строка, если DC запускается первым)
+            # Но по нашей логике, DC уже отработал, и его результат в scenario_context["details_from_collector"]
+            details_from_collector = scenario_context.get("details_from_collector")
+            if not isinstance(details_from_collector, dict):
+                logger.error(f"[{self.agent_id}] 'details_from_collector' не найден или не словарь в scenario_context!")
+                return {"status":"error", "message_to_user":"Ошибка: нет данных для принятия решения.", "next_agent_state":current_agent_state}
+
+            # Формируем input для Структуры 1 промпта DM
+            input_json_for_langchain_agent = json.dumps({"incident_data": details_from_collector}, ensure_ascii=False)
+            current_task_description_for_log = "Первичный анализ и обогащение данных"
+            # dm_dialog_history для LLM пока пуста
+        else: # Второй вызов DM - пользователь ответил на запрос подтверждения
+            # user_input здесь - это ответ пользователя "да" / "нет"
+            payload_for_confirmation_step = {
+                "initial_incident_payload": pending_confirmation_payload, # Обогащенный payload с предыдущего шага
+                "user_confirm_reply": user_input
+            }
+            input_json_for_langchain_agent = json.dumps(payload_for_confirmation_step, ensure_ascii=False)
+            current_task_description_for_log = f"Обработка ответа пользователя на подтверждение: '{user_input}'"
+            dm_dialog_history.append({"type": "human", "content": user_input}) # Добавляем ответ юзера в историю DM
+
+        dm_system_prompt_text = get_dm_system_prompt_v2() # Получаем промпт V2
+
+        # Langchain агент будет использовать 'input' (наша JSON-строка)
+        # и 'agent_scratchpad'. Он также может использовать 'chat_history', если мы ее передадим.
+        # Промпт DM_SYSTEM_PROMPT_LANGCHAIN_V2 не имеет плейсхолдера для chat_history,
+        # он ожидает всю информацию в 'input'.
+        prompt_for_lc_agent = ChatPromptTemplate.from_messages([
+            ("system", dm_system_prompt_text),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
+
+        agent_runnable = create_openai_functions_agent(self.llm, self.tools, prompt_for_lc_agent)
+        executor = AgentExecutor(agent=agent_runnable, tools=self.tools, verbose=True, handle_parsing_errors="Output parser failed to parse")
+
+        logger.info(f"[{self.agent_id}] Invoking DM. Task: {current_task_description_for_log}. Input JSON (part): '{input_json_for_langchain_agent[:200]}...'")
+
+        try:
+            response = await executor.ainvoke({"input": input_json_for_langchain_agent})
+            agent_final_output = response.get("output", "Не удалось принять/обработать решение.")
+            # intermediate_steps = response.get("intermediate_steps", []) # Могут быть полезны для извлечения обогащенных данных
+        except Exception as e:
+            logger.error(f"[{self.agent_id}] Ошибка DM executor: {e}", exc_info=True)
+            return {"status": "error", "message_to_user": "Ошибка при принятии решения.", "next_agent_state": current_agent_state}
+
+        # Обновляем состояние агента
+        next_agent_state = {
+            "dm_dialog_history": list(dm_dialog_history),
+            "pending_confirmation_payload": None # Сбрасываем по умолчанию
+        }
+        # Ответ агента (вопрос или финальное сообщение) добавляется в историю
+        next_agent_state["dm_dialog_history"].append({"type": "ai", "content": agent_final_output.split(CONFIRMATION_REQUEST_MARKER)[0].strip()})
+
+
+        if CONFIRMATION_REQUEST_MARKER in agent_final_output:
+            # Агент запросил подтверждение. Нужно сохранить обогащенный incident_data,
+            # который агент должен был "запомнить" в своем scratchpad и использовать для формирования плана.
+            # Это сложно извлечь из create_openai_functions_agent напрямую.
+            # Промпт должен был бы инструктировать агента вернуть этот обогащенный payload
+            # вместе с запросом на подтверждение, если бы мы хотели его явно сохранить.
+            # Либо, мы передаем НЕОБОГАЩЕННЫЙ initial_payload на втором шаге, и агент СНОВА его обогащает перед выполнением.
+            # Промпт V2 говорит: "Возьми ПОЛНЫЙ initial_incident_payload (который ты сохранил или который передан)".
+            # Это означает, что если мы хотим избежать повторного обогащения, то initial_payload,
+            # который мы передаем на втором шаге, должен быть уже обогащенным.
+            # Значит, после первого вызова, если запрошено подтверждение, нам нужно как-то получить
+            # обогащенный `incident_data` от агента.
+            # Это можно сделать, если агент в своем `output` (где есть маркер) также возвращает этот payload.
+            # Или мы можем попробовать извлечь его из `intermediate_steps`.
+
+            # Упрощение: Предположим, что `initial_payload` (который был из DC) достаточно для второго шага,
+            # и если DM обогащал его, он это сделал "в уме" для планирования, а для выполнения
+            # ему снова передается исходный `initial_payload` и он снова его обогатит перед `take_action`.
+            # Это неэффективно, но проще для начала.
+            # Либо, сценарий должен передать `initial_payload` из `current_agent_state` в `pending_confirmation_payload`
+            # если он не был изменен агентом.
+
+            # Если агент сам обогатил данные и использовал их для плана, он должен их "запомнить"
+            # для этапа выполнения. Langchain агенты с памятью могут это делать.
+            # Для stateless вызова executor'а, мы должны передавать все данные каждый раз.
+            # Промпт V2 просит агента "сохранить ПОЛНЫЙ incident_data ... в своем внутреннем состоянии (scratchpad или память агента)".
+            # Если мы используем stateless executor, то это не сработает.
+            # Значит, `initial_incident_payload` в Структуре 2 должен быть тем, что агент обогатил.
+            # Это означает, что если агент запросил подтверждение, он должен в своем ответе
+            # (помимо текста для юзера) вернуть и этот обогащенный payload.
+            # Это усложняет парсинг ответа агента.
+
+            # ВАРИАНТ ПРОЩЕ: Сценарий сохраняет `initial_payload` (необогащенный от DC)
+            # и передает его DM на втором шаге. DM снова обогащает его перед `take_action`.
+            next_agent_state["pending_confirmation_payload"] = initial_payload # Сохраняем то, что пришло от DC
+            next_agent_state["confirmation_requested"] = True
+
+            return {
+                "status": "in_progress",
+                "message_to_user": agent_final_output.replace(CONFIRMATION_REQUEST_MARKER, "").strip(),
+                "next_agent_state": next_agent_state
+            }
+        else: # Финальный ответ от DM (действия выполнены или отменены)
+            return {
+                "status": "completed",
+                "message_to_user": agent_final_output,
+                "result": {"decision_outcome_message": agent_final_output},
+                "next_agent_state": next_agent_state
+            }

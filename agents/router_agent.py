@@ -1,88 +1,134 @@
+# agents/router_agent.py
 import logging
-from langchain_openai import ChatOpenAI
-from config import OPENAI_API_KEY
-from llm_services import get_llm
-from scenarios.base_scenario import BaseScenario
-from typing import Dict, Type
+from typing import Dict, Any, List, Optional, Type
+
+from langchain_core.messages import SystemMessage, HumanMessage
+# AIMessage не используется, если история передается как список словарей
+
+from .base_agent import BaseAgent
+from scenarios.base_scenario import BaseScenario # Для тайпхинта в конструкторе
 
 logger = logging.getLogger(__name__)
-router_llm = get_llm(temperature=0.1)
 
 ROUTER_SYSTEM_PROMPT_TEMPLATE = """
 Ты - ИИ-диспетчер службы поддержки директоров магазинов. Твоя задача - понять основной запрос пользователя и направить его в нужный раздел.
-Проанализируй сообщение пользователя: "{user_input}"
-Учитывай также предыдущую историю диалога, если она есть.
+Проанализируй ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ. Учитывай также предыдущую историю диалога, если она есть.
+
+ПОСЛЕДНЕЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ:
+"{user_input_for_router}"
+
+ИСТОРИЯ ДИАЛОГА (если есть):
+{dialog_history_formatted}
 
 Доступные разделы (сценарии) и их **ИДЕНТИФИКАТОРЫ**:
 {scenarios_formatted_for_prompt}
 
-Если ты уверен, какой сценарий подходит, верни **ТОЛЬКО ИДЕНТИФИКАТОР** этого сценария (например, `courier_complaint` или `faq_general`). Не добавляй никакого другого текста.
-Если пользователь просто поздоровался или его запрос слишком общий и неясный, задай уточняющий вопрос, чтобы помочь ему определиться. Ты можешь упомянуть некоторые из доступных сценариев и их идентификаторы в своем вопросе.
-Если пользователь спрашивает, что ты умеешь, перечисли доступные сценарии с их идентификаторами.
-Твой ответ должен быть либо ИДЕНТИФИКАТОРОМ сценария, либо вопросом.
+ТВОИ ДЕЙСТВИЯ:
+- Если ты уверен, какой сценарий подходит на основе сообщения пользователя, верни **ТОЛЬКО ИДЕНТИФИКАТОР** этого сценария (например, `complaint_scenario_orchestrator` или `faq_general`). Не добавляй никакого другого текста.
+- Если пользователь просто поздоровался или его запрос слишком общий и неясный (например, "помоги", "есть проблема"), задай уточняющий вопрос, чтобы помочь ему определиться. Ты можешь упомянуть пару доступных сценариев.
+- **Если пользователь спрашивает о твоих возможностях (например, "что ты умеешь?", "чем можешь помочь?"), ПЕРЕЧИСЛИ ВСЕ доступные сценарии с их кратким описанием и идентификаторами, как они даны тебе выше.**
+- Твой ответ должен быть либо ИДЕНТИФИКАТОРОМ сценария, либо вопросом/перечислением возможностей.
 """
 
-def generate_scenarios_text_for_prompt(available_scenarios_map: Dict[str, Type[BaseScenario]]) -> str:
-    """
-    Генерирует текст со списком сценариев для промпта роутера.
-    `available_scenarios_map`: Словарь {scenario_id: ScenarioClass}
-    """
-    lines = []
-    for scenario_id_key, ScenarioClass in available_scenarios_map.items():
+def format_router_dialog_history(history: List[Dict[str, str]]) -> str:
+    if not history: return "Нет предыдущей истории диалога."
+    return "\n".join([f"{msg['type'].capitalize()}: {msg['content']}" for msg in history])
+
+class RouterAgent(BaseAgent):
+    agent_id: str = "router_agent_main" # Убедимся, что ID есть
+
+    def __init__(self, available_scenarios_map: Dict[str, Type[BaseScenario]],
+                 llm_provider_config: Optional[Dict[str, Any]] = None): # Добавил llm_config
+        super().__init__(llm_provider_config=llm_provider_config) # Передаем llm_config
+        self.available_scenarios_map = available_scenarios_map
+        self.scenarios_text_for_prompt = self._generate_scenarios_text()
+
+    def _generate_scenarios_text(self) -> str:
+        # ... (код без изменений, генерирует список сценариев для промпта)
+        lines = []
+        for scenario_id_key, ScenarioClass in self.available_scenarios_map.items():
+            try:
+                actual_id_for_prompt = ScenarioClass.id
+                if ScenarioClass.id != scenario_id_key:
+                    logger.warning(f"RouterAgent: Mismatch for scenario ID! Key: '{scenario_id_key}', ScenarioClass.id: '{ScenarioClass.id}'. Using ScenarioClass.id: '{actual_id_for_prompt}'")
+
+                friendly_name = ScenarioClass.friendly_name
+                description = ScenarioClass.description
+                lines.append(f"- Сценарий '{friendly_name}' (ИДЕНТИФИКАТОР для ответа: `{actual_id_for_prompt}`): {description}")
+            except AttributeError as e:
+                logger.error(f"RouterAgent: Error getting metadata for scenario class {ScenarioClass.__name__} (ID from key: {scenario_id_key}): {e}.")
+                lines.append(f"- Сценарий с ID `{scenario_id_key}` (описание не доступно)")
+        return "\n".join(lines)
+
+
+    def _get_default_tools(self) -> List[Any]: # List[BaseTool]
+        return [] # RouterAgent не использует инструменты
+
+    def get_initial_state(self, scenario_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # RouterAgent stateless в рамках своей сессии, ему не нужно хранить что-то между вызовами process_user_input.
+        # Но для соответствия интерфейсу, возвращаем пустой словарь.
+        return {"dialog_history_for_router": []} # Или просто {}
+
+    async def process_user_input(
+            self,
+            user_input: str,
+            current_agent_state: Dict[str, Any], # Будет содержать dialog_history_for_router
+            scenario_context: Optional[Dict[str, Any]] = None # scenario_context здесь может содержать общую историю чата
+    ) -> Dict[str, Any]:
+
+        # RouterAgent использует общую историю чата, которую ему передает main_bot через scenario_context,
+        # а не свою внутреннюю "сессионную" историю, так как он вызывается каждый раз заново для маршрутизации.
+        # current_agent_state["dialog_history_for_router"] здесь не используется.
+        # Вместо этого, main_bot должен передавать историю в scenario_context.
+
+        # Предположим, main_bot передает историю в scenario_context["main_chat_history"]
+        main_chat_history = scenario_context.get("main_chat_history", []) if scenario_context else []
+
+        system_prompt = ROUTER_SYSTEM_PROMPT_TEMPLATE.format(
+            user_input_for_router=user_input,
+            dialog_history_formatted=format_router_dialog_history(main_chat_history),
+            scenarios_formatted_for_prompt=self.scenarios_text_for_prompt
+        )
+
+        messages = [SystemMessage(content=system_prompt)]
+        # user_input уже включен в системный промпт как {user_input_for_router}
+        # и история тоже {dialog_history_formatted}.
+        # Поэтому для LLM достаточно одного системного сообщения.
+
+        logger.info(f"[{self.agent_id}] Routing input: '{user_input[:100]}...'. History len: {len(main_chat_history)}")
+
         try:
-            if ScenarioClass.id != scenario_id_key:
-                logger.warning(f"Несовпадение ID для сценария! Ключ: '{scenario_id_key}', ScenarioClass.id: '{ScenarioClass.id}'. Используется ключ.")
+            response = await self.llm.ainvoke(messages)
+            llm_output_text = response.content.strip()
+            logger.info(f"[{self.agent_id}] LLM output: '{llm_output_text}'")
 
-            actual_id_for_prompt = scenario_id_key
+            cleaned_llm_output = llm_output_text.replace("'", "").replace("`", "").replace('"', '')
 
-            friendly_name = ScenarioClass.friendly_name
-            description = ScenarioClass.description
-            lines.append(f"- Сценарий '{friendly_name}' (ИДЕНТИФИКАТОР для ответа: `{actual_id_for_prompt}`): {description}")
-        except AttributeError as e:
-            logger.error(f"Ошибка получения метаданных для класса сценария {ScenarioClass.__name__} (ID из ключа: {scenario_id_key}): {e}. Убедитесь, что id, friendly_name и description определены как classmethod properties.")
-            lines.append(f"- Сценарий с ID `{scenario_id_key}` (описание не доступно)")
-    return "\n".join(lines)
+            # Результат для RouterAgent - это либо ID сценария, либо вопрос
+            # Это не совсем "финальный результат" в смысле данных, а скорее команда.
+            # Статус всегда "completed", так как роутер выполняет свою задачу за один проход.
 
+            next_agent_state = current_agent_state # Роутер не меняет свое состояние
 
-async def run_router_agent(user_input: str, chat_history: list, available_scenarios_map: Dict[str, Type[BaseScenario]]) -> dict:
-    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    from langchain_core.messages import HumanMessage, AIMessage
-
-    scenarios_text = generate_scenarios_text_for_prompt(available_scenarios_map)
-
-    system_prompt_content = ROUTER_SYSTEM_PROMPT_TEMPLATE.format(
-        scenarios_formatted_for_prompt=scenarios_text,
-        user_input="{user_input_placeholder}"
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt_content),
-        MessagesPlaceholder(variable_name="chat_history_placeholder", optional=True),
-        ("human", "{user_input_placeholder}")
-    ])
-
-    langchain_chat_history = []
-    for msg in chat_history:
-        if msg.get("type") == "human": langchain_chat_history.append(HumanMessage(content=msg["content"]))
-        elif msg.get("type") == "ai": langchain_chat_history.append(AIMessage(content=msg["content"]))
-
-    chain = prompt | router_llm
-    logger.info(f"RouterAgent: обрабатываю '{user_input}' со списком сценариев:\n{scenarios_text}")
-    try:
-        response = await chain.ainvoke({
-            "user_input_placeholder": user_input,
-            "chat_history_placeholder": langchain_chat_history
-        })
-        llm_output_text = response.content.strip()
-        logger.info(f"RouterAgent LLM output: '{llm_output_text}'")
-
-        if llm_output_text.replace("'", '').replace('`', '').replace('"','') in available_scenarios_map.keys():
-            logger.info(f"RouterAgent: LLM вернул точный ID сценария '{llm_output_text}'")
-            return {"type": "scenario_id", "value": llm_output_text}
-        else:
-            logger.info(f"RouterAgent: ответ LLM ('{llm_output_text}') не является чистым ID, классифицирован как вопрос.")
-            return {"type": "question", "value": llm_output_text}
-
-    except Exception as e:
-        logger.error(f"Ошибка в run_router_agent: {e}", exc_info=True)
-        return {"type": "question", "value": "Произошла ошибка при маршрутизации. Попробуйте позже."}
+            if cleaned_llm_output in self.available_scenarios_map:
+                return {
+                    "status": "completed",
+                    "message_to_user": None, # Роутер сам не отвечает пользователю, если выбрал сценарий
+                    "result": {"type": "scenario_id", "value": cleaned_llm_output},
+                    "next_agent_state": next_agent_state
+                }
+            else: # LLM задала вопрос или не смогла определить сценарий
+                return {
+                    "status": "completed", # Задача роутера (попытка маршрутизации) выполнена
+                    "message_to_user": llm_output_text, # Это вопрос/сообщение для пользователя
+                    "result": {"type": "question", "value": llm_output_text}, # Результат - это вопрос
+                    "next_agent_state": next_agent_state
+                }
+        except Exception as e:
+            logger.error(f"[{self.agent_id}] Ошибка: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message_to_user": "Произошла ошибка при маршрутизации вашего запроса.",
+                "next_agent_state": current_agent_state,
+                "result": {"type": "error", "value": "Routing error"}
+            }

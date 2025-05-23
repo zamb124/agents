@@ -1,101 +1,91 @@
 # tools/warehouse_api.py
 import logging
 import httpx
-# sqlalchemy.util.await_only больше не нужен, если мы не используем SQLAlchemy здесь
-import asyncio # Для await_only если бы он был нужен
+import asyncio # Для asyncio.run в get_warehouse_by_director_login, если нужно (не лучшая практика)
 
 import config
-from tools.courier_api import generate_mock_data_for_warehouses, MOCK_DIRECTORS_DB  # Импортируем функцию генерации
+# Импортируем generate_mock_data_for_warehouses из courier_api
+from .courier_api import generate_mock_data_for_warehouses
 
 logger = logging.getLogger(__name__)
 
-WAREHOUSES = {} # Глобальный кэш для складов
-WAREHOUSES_LOADED = False # Флаг, что склады загружены
+WAREHOUSES = {}
+WAREHOUSES_LOADED = False
 
-async def load_warehouses_if_needed():
-    """Загружает склады, если они еще не были загружены."""
+# Моковая база директоров для get_warehouse_by_director_login
+# Ключ - логин директора, значение - информация о его складе
+# warehouse_id здесь должен совпадать с ID из WAREHOUSES после загрузки
+MOCK_DIRECTORS_DB = {
+    "director_main_wh": {"warehouse_id": "moscow_center_1", "warehouse_name": "Центральный Склад (Москва)", "director_name": "Иван Петров"},
+    "director_north_spb": {"warehouse_id": "spb_north_3", "warehouse_name": "Северный Филиал (СПБ)", "director_name": "Мария Сидорова"},
+    # Добавьте больше директоров по необходимости
+}
+
+
+async def load_warehouses_if_needed(force_reload: bool = False):
     global WAREHOUSES, WAREHOUSES_LOADED
-    if WAREHOUSES_LOADED:
+    if WAREHOUSES_LOADED and not force_reload:
+        logger.debug("Склады уже были загружены.")
         return WAREHOUSES
 
-    logger.info("Загрузка списка складов из WMS API...")
-    payload  = {
-        "cluster_id": "5d7f3dbe80ea485f940e327bb73f08be000200010000",
-        "_fields": ["store_id", "external_id", "title", "type", "status", "cluster_id", "company_id", "tags","vars","errors"]
-    }
-    headers = {
-        'authorization': f'Bearer {config.WMS_TOKEN}',
-    }
+    logger.info(f"Загрузка списка складов... (force_reload={force_reload})")
 
-    if not config.WMS_TOKEN:
-        logger.error("WMS_TOKEN не найден в конфигурации. Невозможно загрузить склады из API.")
-        # Можно загрузить моковые склады по умолчанию в этом случае
-        WAREHOUSES = {
-            "w1_mock": {"warehouse_id": "w1_mock", "warehouse_name": "Мок Центральный склад", "city": "Москва"},
-            "w2_mock": {"warehouse_id": "w2_mock", "warehouse_name": "Мок Северный филиал", "city": "СПБ"},
+    # Реальная логика загрузки из API (если WMS_TOKEN есть)
+    if config.WMS_TOKEN:
+        logger.info("WMS_TOKEN найден, попытка загрузки складов из WMS API.")
+        payload  = {
+            "cluster_id": "5d7f3dbe80ea485f940e327bb73f08be000200010000", # Пример
+            "_fields": ["store_id", "external_id", "title", "type", "status", "cluster_id", "company_id", "tags","vars","errors"]
         }
-        logger.info(f"Загружены моковые склады по умолчанию: {len(WAREHOUSES)} шт.")
-        generate_mock_data_for_warehouses(WAREHOUSES) # Генерируем моки на основе моковых складов
-        WAREHOUSES_LOADED = True
-        return WAREHOUSES
+        headers = {'authorization': f'Bearer {config.WMS_TOKEN}'}
+        current_warehouses_from_api = {}
+        page_count = 0
+        max_pages = 10 # Ограничение для безопасности
 
-    current_warehouses = {}
-    page_count = 0
-    max_pages = 100 # Ограничение, чтобы не уйти в бесконечный цикл при проблемах с API
-
-    try:
-        while page_count < max_pages:
-            page_count += 1
-            logger.info(f"Запрос WMS API, страница/курсор: {payload.get('cursor', 'начальная')}")
+        try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url='https://wms.lavka.yandex.ru/api/admin/stores/list', headers=headers, json=payload)
-                response.raise_for_status() # Вызовет исключение для 4xx/5xx ответов
-                result = response.json()
+                while page_count < max_pages:
+                    page_count += 1
+                    logger.debug(f"Запрос WMS API, страница/курсор: {payload.get('cursor', 'начальная')}")
+                    response = await client.post(url='https://wms.lavka.yandex.ru/api/admin/stores/list', headers=headers, json=payload)
+                    response.raise_for_status()
+                    result = response.json()
 
-                if result.get('result'):
-                    for war in result['result']:
-                        # Используем external_id как основной ID, приводим к нижнему регистру для консистентности
-                        wh_id = war.get('external_id', war.get('store_id', '')).lower()
-                        if not wh_id:
-                            logger.warning(f"Склад без external_id/store_id пропущен: {war.get('title')}")
-                            continue
+                    if result.get('result'):
+                        for wh_data in result['result']:
+                            wh_id = wh_data.get('external_id', wh_data.get('store_id', '')).lower()
+                            if not wh_id: continue
+                            current_warehouses_from_api[wh_id] = {
+                                "warehouse_id": wh_id,
+                                "warehouse_name": wh_data.get('title', 'N/A').strip(), # Убираем лишние пробелы
+                                "city": wh_data.get('vars', {}).get('address_city', 'Город не указан'),
+                                "status": wh_data.get('status', 'unknown'),
+                                "raw_data": wh_data
+                            }
+                    cursor = result.get('cursor')
+                    if cursor: payload['cursor'] = cursor
+                    else: break
+            WAREHOUSES = current_warehouses_from_api
+            logger.info(f"Загружено {len(WAREHOUSES)} складов из WMS API.")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ошибка HTTP при запросе к WMS API: {e.response.status_code} - {e.response.text}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при загрузке складов из WMS API: {e}", exc_info=True)
 
-                        current_warehouses[wh_id] = {
-                            "warehouse_id": wh_id,
-                            "warehouse_name": war.get('title', 'Без названия').lower(), # Тоже к нижнему регистру
-                            "city": war.get('vars', {}).get('address_city', 'Город не указан'), # Пример получения города
-                            "raw_data": war # Сохраняем исходные данные на всякий случай
-                        }
-
-                cursor = result.get('cursor')
-                if cursor:
-                    payload['cursor'] = cursor
-                else:
-                    logger.info("Достигнут конец списка складов от WMS API.")
-                    break
-        else: # Если вышли по max_pages
-            logger.warning(f"Загрузка складов прервана после {max_pages} запросов к API.")
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Ошибка HTTP при запросе к WMS API: {e.response.status_code} - {e.response.text}", exc_info=True)
-    except httpx.RequestError as e:
-        logger.error(f"Ошибка сети при запросе к WMS API: {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка при загрузке складов из WMS API: {e}", exc_info=True)
-
-    if not current_warehouses: # Если ничего не загрузилось из API
-        logger.warning("Не удалось загрузить склады из WMS API, будут использованы моковые по умолчанию.")
-        WAREHOUSES = { # Запасные моки
-            "w1_default": {"warehouse_id": "w1_default", "warehouse_name": "Дефолтный Центральный", "city": "Москва"},
-            "w2_default": {"warehouse_id": "w2_default", "warehouse_name": "Дефолтный Северный", "city": "СПБ"},
+    # Если WMS_TOKEN нет или загрузка из API не удалась, используем моки
+    if not WAREHOUSES: # Если WAREHOUSES пуст после попытки загрузки из API
+        logger.warning("Не удалось загрузить склады из WMS API или WMS_TOKEN не указан. Используются моковые склады.")
+        WAREHOUSES = {
+            "moscow_center_1": {"warehouse_id": "moscow_center_1", "warehouse_name": "Центральный Склад (Москва)", "city": "Москва", "status": "active"},
+            "moscow_south_2": {"warehouse_id": "moscow_south_2", "warehouse_name": "Южный Склад (Москва)", "city": "Москва", "status": "active"},
+            "spb_north_3": {"warehouse_id": "spb_north_3", "warehouse_name": "Северный Филиал (СПБ)", "city": "Санкт-Петербург", "status": "active"},
+            "spb_center_4": {"warehouse_id": "spb_center_4", "warehouse_name": "Центральный Склад (СПБ)", "city": "Санкт-Петербург", "status": "inactive"},
+            "ekb_main_5": {"warehouse_id": "ekb_main_5", "warehouse_name": "Главный Склад (Екатеринбург)", "city": "Екатеринбург", "status": "active"},
         }
-    else:
-        WAREHOUSES = current_warehouses
+        logger.info(f"Загружено {len(WAREHOUSES)} моковых складов.")
 
-    logger.info(f"Загружено/используется {len(WAREHOUSES)} складов.")
-    logger.debug(f"Первые несколько складов: {list(WAREHOUSES.items())[:2]}")
-
-    # Генерируем моковые данные для курьеров и смен на основе загруженных складов
+    # Генерация моковых данных для курьеров и смен на основе загруженных/моковых складов
+    # Эта функция из courier_api.py
     generate_mock_data_for_warehouses(WAREHOUSES)
 
     WAREHOUSES_LOADED = True
@@ -103,91 +93,92 @@ async def load_warehouses_if_needed():
 
 
 def get_warehouse_by_director_login(director_login: str) -> dict:
-    """
-    Определяет склад по логину директора.
-    Сначала пытается найти точное совпадение логина директора с ID склада в загруженном списке WAREHOUSES.
-    Затем, если не найдено, проверяет MOCK_DIRECTORS_DB.
-    """
     global WAREHOUSES, WAREHOUSES_LOADED
-    if not WAREHOUSES_LOADED: # Гарантируем, что склады загружены
-        # В синхронной функции мы не можем делать await. Это проблема.
-        # get_warehouse_by_director_login должна быть асинхронной или load_warehouses_if_needed должна вызываться заранее.
-        # Пока сделаем так, что если не загружено, вернем ошибку, намекая на необходимость предварительной загрузки.
-        logger.warning("Склады еще не загружены. get_warehouse_by_director_login может работать некорректно.")
-        # Или можно попытаться загрузить синхронно, если это возможно (не рекомендуется для httpx)
-        # asyncio.run(load_warehouses_if_needed()) # Плохая практика вызывать run из синхронной функции в асинхронном приложении
+    if not WAREHOUSES_LOADED:
+        logger.warning("Склады еще не загружены. Попытка синхронной загрузки (может быть долго или вызвать ошибку в async среде)...")
+        # Это плохая практика вызывать asyncio.run из синхронной функции в асинхронном приложении.
+        # Лучше убедиться, что load_warehouses_if_needed() вызвана асинхронно при старте бота.
+        try:
+            asyncio.run(load_warehouses_if_needed())
+        except RuntimeError as e: # "asyncio.run() cannot be called from a running event loop"
+            logger.error(f"Ошибка при попытке синхронной загрузки складов: {e}. Склады могут быть недоступны.")
+            return {"success": False, "message": "Ошибка инициализации данных о складах. Попробуйте позже."}
+
 
     logger.info(f"[API][WAREHOUSE] Запрос склада по логину директора: {director_login}")
-
-    # Попытка 1: Логин директора как ID склада в WAREHOUSES
     director_login_lower = director_login.lower()
+
+    # Попытка 1: Использование MOCK_DIRECTORS_DB
+    if director_login_lower in MOCK_DIRECTORS_DB:
+        mock_director_entry = MOCK_DIRECTORS_DB[director_login_lower]
+        wh_id_from_mock = mock_director_entry["warehouse_id"].lower()
+
+        if wh_id_from_mock in WAREHOUSES:
+            warehouse_data = WAREHOUSES[wh_id_from_mock].copy()
+            # Можно дополнить именем директора из MOCK_DIRECTORS_DB, если нужно
+            warehouse_data["director_name_from_mock"] = mock_director_entry.get("director_name")
+            logger.info(f"Склад найден через MOCK_DIRECTORS_DB для логина {director_login}: {warehouse_data['warehouse_name']}")
+            return {"success": True, "warehouse_info": warehouse_data}
+        else:
+            logger.warning(f"Склад ID '{wh_id_from_mock}' из MOCK_DIRECTORS_DB для логина {director_login} не найден в общем списке WAREHOUSES.")
+            # Можно вернуть информацию из MOCK_DIRECTORS_DB как есть, если считаем ее валидной
+            # return {"success": True, "warehouse_info": mock_director_entry.copy(), "message": "Информация о складе взята из справочника директоров, но не найдена в общем списке складов."}
+
+
+    # Попытка 2: Логин директора как ID склада в WAREHOUSES (менее вероятно, но возможно)
     if director_login_lower in WAREHOUSES:
         logger.info(f"Склад найден по логину директора (совпал с ID склада): {director_login_lower}")
         return {"success": True, "warehouse_info": WAREHOUSES[director_login_lower].copy()}
 
-    # Попытка 2: Использование MOCK_DIRECTORS_DB
-    if director_login in MOCK_DIRECTORS_DB:
-        mock_director_entry = MOCK_DIRECTORS_DB[director_login]
-        wh_id_from_mock = mock_director_entry["warehouse_id"].lower()
-        if wh_id_from_mock in WAREHOUSES:
-            logger.info(f"Склад найден через MOCK_DIRECTORS_DB (логин: {director_login}, ID склада: {wh_id_from_mock}) и подтвержден в WAREHOUSES.")
-            # Берем данные из WAREHOUSES, так как они "реальные", но можем дополнить именем из MOCK_DIRECTORS_DB, если оно там "лучше"
-            warehouse_data = WAREHOUSES[wh_id_from_mock].copy()
-            warehouse_data["warehouse_name"] = mock_director_entry.get("warehouse_name", warehouse_data["warehouse_name"]) # Приоритет имени из MOCK_DIRECTORS_DB
-            return {"success": True, "warehouse_info": warehouse_data}
-        else:
-            logger.warning(f"Склад ID {wh_id_from_mock} из MOCK_DIRECTORS_DB для логина {director_login} не найден в загруженном списке WAREHOUSES.")
-            # Можно вернуть информацию из MOCK_DIRECTORS_DB как есть, если считаем ее валидной
-            return {"success": True, "warehouse_info": mock_director_entry.copy(), "message": "Информация о складе взята из справочника директоров, но не найдена в общем списке складов."}
-
-
-    logger.warning(f"[API][WAREHOUSE] Логин директора '{director_login}' не найден ни как ID склада, ни в справочнике директоров.")
-    return {"success": False, "message": f"Информация о складе для директора с логином '{director_login}' не найдена. Пожалуйста, уточните название или ID вашего склада."}
+    logger.warning(f"Логин директора '{director_login}' не найден ни в справочнике директоров, ни как ID склада.")
+    return {"success": False, "message": f"Информация о складе для директора '{director_login}' не найдена. Пожалуйста, укажите название или ID вашего склада."}
 
 
 async def find_warehouse_by_name_or_id(identifier: str) -> dict:
-    """
-    Ищет склад по ID или названию в загруженном списке WAREHOUSES.
-    """
     global WAREHOUSES, WAREHOUSES_LOADED
     if not WAREHOUSES_LOADED:
-        await load_warehouses_if_needed() # Загружаем, если еще не было
+        await load_warehouses_if_needed()
 
     logger.info(f"[API][WAREHOUSE] Поиск склада по идентификатору: '{identifier}'")
     identifier_lower = identifier.lower().strip()
 
-    # Сначала точный поиск по ID (ключи в WAREHOUSES уже в lower case)
+    # Сначала точный поиск по ID
     if identifier_lower in WAREHOUSES:
         warehouse_info = WAREHOUSES[identifier_lower].copy()
-        logger.info(f"[API][WAREHOUSE] Склад найден по ID: {identifier_lower}")
+        logger.info(f"Склад найден по ID: {identifier_lower} - {warehouse_info['warehouse_name']}")
         return {"success": True, "warehouse_info": warehouse_info}
 
-    # Затем поиск по названию (собираем всех кандидатов)
+    # Затем поиск по части названия
     found_candidates = []
     for wh_id, info in WAREHOUSES.items():
-        # info["warehouse_name"] тоже должен быть в lower case при загрузке
         if identifier_lower in info.get("warehouse_name", "").lower():
             candidate_info = info.copy()
+            # candidate_info["warehouse_id"] = wh_id # Уже есть в info
             found_candidates.append(candidate_info)
 
     if not found_candidates:
-        logger.warning(f"[API][WAREHOUSE] Склад с идентификатором '{identifier}' не найден.")
-        return {"success": False, "message": f"Склад с названием или ID '{identifier}' не найден. Пожалуйста, проверьте правильность ввода."}
+        logger.warning(f"Склад с идентификатором '{identifier}' не найден.")
+        return {"success": False, "message": f"Склад с названием или ID '{identifier}' не найден."}
 
     if len(found_candidates) == 1:
         warehouse_info = found_candidates[0]
-        logger.info(f"[API][WAREHOUSE] Склад найден по названию '{identifier}': {warehouse_info['warehouse_name']} (ID: {warehouse_info['warehouse_id']})")
+        logger.info(f"Склад найден по названию '{identifier}': {warehouse_info['warehouse_name']} (ID: {warehouse_info['warehouse_id']})")
         return {"success": True, "warehouse_info": warehouse_info}
 
-    logger.info(f"[API][WAREHOUSE] Найдено несколько ({len(found_candidates)}) складов по запросу '{identifier}'.")
-    candidates_details = [f"- {cand['warehouse_name']} (ID: {cand['warehouse_id']})" + (f", Город: {cand.get('city', '')}" if cand.get('city') else "") for cand in found_candidates]
-    candidate_list_str = "\n".join(candidates_details)
+    logger.info(f"Найдено несколько ({len(found_candidates)}) складов по запросу '{identifier}'.")
+    candidates_details = [
+        f"- {cand['warehouse_name']} (ID: {cand['warehouse_id']})" +
+        (f", Город: {cand.get('city', 'N/A')}" if cand.get('city') else "") +
+        (f", Статус: {cand.get('status', 'N/A')}" if cand.get('status') else "")
+        for cand in found_candidates
+    ]
 
     return {
         "success": "multiple_found",
         "candidates": found_candidates,
         "message": (
-            f"Найдено несколько складов, соответствующих запросу '{identifier}':\n{candidate_list_str}\n"
-            "Пожалуйста, уточните, о каком именно складе идет речь, указав его ID или более полное название."
+                f"Найдено несколько складов, соответствующих '{identifier}':\n" +
+                "\n".join(candidates_details) +
+                "\nПожалуйста, уточните ID или более полное название."
         )
     }
